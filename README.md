@@ -7,7 +7,7 @@ At present, only  tcp protocol is supported and UDP is under consideration
 
 
 protocol hierarchy
-s
+        
        -------------------
        |  User TCP data  |
        -------------------
@@ -42,15 +42,15 @@ require Python module : websockets , msgpack-python , pycryptodome
 
 
 confile file formation
-
-{
-    "mode" : "aes-128-gcm",
-    "key" : "jnfdnfvdnvdsvdv33r932mj9&023",
-    "serverAddress" : "127.0.0.1",
-    "serverPort" : 8765,
-    "localAddress": "0.0.0.0",
-    "localPort" : 8766
-}
+    
+    {
+        "mode" : "aes-128-gcm",
+        "key" : "jnfdnfvdnvdsvdv33r932mj9&023",
+        "serverAddress" : "127.0.0.1",
+        "serverPort" : 8765,
+        "localAddress": "0.0.0.0",
+        "localPort" : 8766
+    }
 
 
 server side :
