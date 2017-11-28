@@ -7,7 +7,9 @@ import json
 import logging
 import concurrent.futures
 import argparse
-from secure import *
+from cipher_algorithm import *
+import copy
+import sys
 
 
 class Stream:
@@ -48,7 +50,6 @@ class Stream:
 
     async def read_from_server(self):
         while True:
-            raw_data = None
             try:
                 raw_data = await self.reader.read(8196)
             except ConnectionResetError:
@@ -65,7 +66,7 @@ class Stream:
 
     async def write_to_server(self):
         while True:
-            message = None
+
             if not self.write_and_close:
                 await self.new_write_queue.wait()
             try:
@@ -98,11 +99,11 @@ class Stream:
 
 
 class Server:
-    def __init__(self, ws, secure):
+    def __init__(self, ws, cipher):
         self.ws = ws
         self.send_queue = asyncio.Queue()
         self.stream_map = {}
-        self.secure = secure
+        self.cipher = cipher
 
     async def run(self):
         asyncio.ensure_future(self.send_to_peer())
@@ -112,7 +113,7 @@ class Server:
         while True:
             data = await self.send_queue.get()
             try:
-                await self.ws.send(self.secure.Encrypt(data))
+                await self.ws.send(self.cipher.encrypt(data))
             except websockets.exceptions.InvalidState as e:
                 print("Websocket InvalidState  %s" % e.args)
                 return
@@ -121,7 +122,7 @@ class Server:
         while True:
             try:
                 data = await self.ws.recv()
-                data = self.secure.Decrypt(data)
+                data = self.cipher.decrypt(data)
             except websockets.exceptions.ConnectionClosed as e:
                 logging.info("Websocket ConnectionClosed %s" % e.args)
                 return
@@ -144,21 +145,23 @@ class Server:
                     self.stream_map[ID].new_write_queue.set()
 
 
-secure = Secure()
+cipher = None
 
 
 async def new_ws_connection(ws, path):
-    server = Server(ws, secure)
+    server = Server(ws, copy.deepcopy(cipher))
     await server.run()
 
 
 def main():
+    global cipher
+
     parser = argparse.ArgumentParser(description="Server part for crossing the GFW")
     parser.add_argument('-c', '--config', help="config file", default='config.json')
     parser.add_argument('-d', '--debug', help='enable debug output', default=False, action='store_true')
     args = parser.parse_args()
 
-    level = logging.DEBUG if args.debug else logging.WARNING
+    level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(level=level,
                         format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
                         datefmt='%H:%M:%S')
@@ -166,7 +169,14 @@ def main():
     with open(args.config) as f:
         config = json.load(f)
 
-    secure.loadKey(config['key'])
+    if config['mode'] == "replace":
+        cipher = Replace()
+        cipher.load_key(config['key'])
+    elif config['mode'] == 'aes-128-gcm':
+        cipher = AES_128_GCM()
+        cipher.load_key(config['key'])
+    else:
+        print("Unsupported mode",file=sys.stderr)
 
     loop = asyncio.get_event_loop()
     asyncio.ensure_future(websockets.serve(new_ws_connection, "0.0.0.0", config["serverPort"]))

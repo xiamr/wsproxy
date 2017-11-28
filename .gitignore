@@ -13,4 +13,4 @@ Desktop.ini
 __pycache__
 
 # My configurations
-config.json
+*.json

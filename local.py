@@ -10,7 +10,8 @@ import concurrent.futures
 import argparse
 import json
 from typing import *
-from secure import *
+from cipher_algorithm import *
+import sys
 
 class Stream:
     def __init__(self, reader, writer, atyp, remote, port, stream_id, local):
@@ -52,7 +53,6 @@ class Stream:
 
     async def read_from_client(self):
         while True:
-            raw_data = None
             try:
                 raw_data = await self.reader.read(8196)
             except ConnectionResetError:
@@ -70,7 +70,6 @@ class Stream:
 
     async def write_to_client(self):
         while True:
-            message = None
             if not self.write_and_close:
                 await self.new_write_queue.wait()
             try:
@@ -103,21 +102,21 @@ class Stream:
 
 
 class Local:
-    def __init__(self, secure):
+    def __init__(self, cipher):
         self.ws = None
         self.stream_map = {}
         self.send_queue = asyncio.Queue()
-        self.secure = secure
+        self.cipher = cipher
 
     async def send_to_peer(self):
         while True:
             data = await self.send_queue.get()
-            await self.ws.send(self.secure.Encrypt(data))
+            await self.ws.send(self.cipher.encrypt(data))
 
     async def read_from_peer(self):
         while True:
             data = await self.ws.recv()
-            data = self.secure.Decrypt(data)
+            data = self.cipher.decrypt(data)
             message = unpack(data)
             ID = message['ID']
             if 'METHOD' in message:
@@ -143,6 +142,7 @@ class Local:
             print(e.args)
             return
         print("websockets connection established !")
+
         asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, listenAdress, listenPort))
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
@@ -154,21 +154,21 @@ class Local:
             print(e.args)
             return
         if len(data) != 3:
-            print("Error data len")
+            print("Error data len",file=sys.stderr)
             writer.close()
             return
         if data[0] != 0x05:
-            print("Not socks5")
+            print("Not socks5",file=sys.stderr)
             writer.close()
             return
         writer.write(b'\x05\x00')
         data = await reader.read(256)
         if data[0] != 0x05:
-            print("Not socks5")
+            print("Not socks5", file=sys.stderr)
             writer.close()
             return
         if data[1] != 0x01:
-            print("Only support no authentication")
+            print("Only support no authentication mnde", sys.stderr)
             writer.close()
             return
         if data[3] == 0x01:
@@ -200,18 +200,22 @@ def main():
     parser.add_argument('-d', '--debug', help='enable debug output', default=False, action='store_true')
     args = parser.parse_args()
 
-    level = logging.DEBUG if args.debug else logging.WARNING
+    level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(level=level,
                         format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
                         datefmt='%H:%M:%S')
-    secure = Secure()
 
     with open(args.config) as f:
         config = json.load(f)
 
-    secure.loadKey(config['key'])
+    if config['mode'] == "replace":
+        cipher = Replace()
+        cipher.load_key(config['key'])
+    elif config['mode'] == 'aes-128-gcm':
+        cipher = AES_128_GCM()
+        cipher.load_key(config['key'])
 
-    local = Local(secure)
+    local = Local(cipher)
     asyncio.ensure_future(local.connect_to_peer("ws://%s:%d" % (config['serverAddress'], config["serverPort"]),
                                                 config['localAddress'], config["localPort"]))
     loop.run_forever()
