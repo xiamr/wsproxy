@@ -1,0 +1,15 @@
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# PyCharm
+
+*.xml
+
+# Python
+*.pyc
+__pycache__
+
+# My configurations
+config.json
