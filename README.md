@@ -1,15 +1,15 @@
 # wsproxy
 Socks5 Proxy over WebSocket
 
-TCP over websocket ( in another word, websocket proxy)
 
-At present, only  tcp protocol is supported and UDP is under consideration
+TCP proxy and UDP proxy are both supported
+unlike to traditional shadowsocks, udp packets are encode in TCP stream 
 
 
 protocol hierarchy
         
        -------------------
-       |  User TCP data  |
+       |  User TCP or UDP |
        -------------------
                 |
        -------------------
@@ -37,7 +37,7 @@ protocol hierarchy
        -------------------
 
 
-require Python 3.5+
+require Python 3.6+
 require Python module : websockets , msgpack-python , pycryptodome
 
 
