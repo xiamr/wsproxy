@@ -12,6 +12,8 @@ import json
 from typing import *
 from cipher_algorithm import *
 import sys
+from datetime import *
+import os
 
 class Stream:
     def __init__(self, reader, writer, atyp, remote, port, stream_id, local):
@@ -80,6 +82,9 @@ class Stream:
                     logging.info("close writer : stream %s" % self.stream_id)
                     if not self.writer.transport.is_closing():
                         self.writer.write_eof()
+                    if self.stream_id in self.local.stream_map:
+                        del self.local.stream_map[self.stream_id]
+
                     return
                 continue
 
@@ -92,13 +97,17 @@ class Stream:
             except ConnectionResetError:
                 if not self.writer.transport.is_closing():
                     self.writer.write_eof()
+                if self.stream_id in self.local.stream_map:
+                    del self.local.stream_map[self.stream_id]
+
                 return
 
     def rclose(self):
         logging.debug("prepare to close writer : stream %s" % self.stream_id)
         self.write_and_close = True
         self.new_write_queue.set()
-        del self.local.stream_map[self.stream_id]
+        if self.stream_id in self.local.stream_map:
+            del self.local.stream_map[self.stream_id]
 
 
 class Local:
@@ -107,16 +116,32 @@ class Local:
         self.stream_map = {}
         self.send_queue = asyncio.Queue()
         self.cipher = cipher
+        self.last_active_time = datetime.now()
+        self.close_tunnel = False
 
     async def send_to_peer(self):
         while True:
             data = await self.send_queue.get()
-            await self.ws.send(self.cipher.encrypt(data))
+            try:
+                await self.ws.send(self.cipher.encrypt(data))
+            except websockets.exceptions.InvalidState as e:
+                print("Websocket InvalidState : %s" % e.args)
+                return
+            self.last_active_time = datetime.now()
 
     async def read_from_peer(self):
         while True:
-            data = await self.ws.recv()
-            data = self.cipher.decrypt(data)
+            try:
+                data = await self.ws.recv()
+            except websockets.exceptions.ConnectionClosed as e:
+                logging.info("Websocket ConnectionClosed : %s" % e.args)
+                return
+            self.last_active_time = datetime.now()
+            try:
+                data = self.cipher.decrypt(data)
+            except ValueError as e:
+                logging.warning("Data is Invalid (Maybe GFW changed the packet): %s" % e.args)
+                return
             message = unpack(data)
             ID = message['ID']
             if 'METHOD' in message:
@@ -135,19 +160,42 @@ class Local:
                     await self.stream_map[ID].write_queue.put(message)
                     self.stream_map[ID].new_write_queue.set()
 
-    async def connect_to_peer(self, uri, listenAdress, listenPort):
+    async def connect_to_peer(self, uri, listenAddress, listenPort, reconnect = False):
+        self.uri = uri
+        self.listenAddres = listenAddress
+        self.listenPort = listenPort
         try:
             self.ws = await websockets.connect(uri)
         except OSError as e:
             print(e.args)
+            raise SystemExit(1)
             return
         print("websockets connection established !")
 
-        asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, listenAdress, listenPort))
+        if not reconnect:
+            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, listenAddress, listenPort))
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
+        asyncio.ensure_future(self.check_connection())
+
+    async def reconnect(self):
+        await self.connect_to_peer(self.uri, self.listenAddres, self.listenPort, True)
+
+    async def check_connection(self):
+        while True:
+            await asyncio.sleep(60)
+            delta = datetime.now() - self.last_active_time
+            if delta.total_seconds() > 3600:
+                self.close_tunnel = True
+                await self.send_queue.put(pack({'METHOD':"CLOSETUNNEL"}))
+                return
 
     async def new_tcp_income(self, reader, writer):
+        if self.close_tunnel:
+            await self.reconnect()
+            self.close_tunnel = False
+
+        self.last_active_time = datetime.now()
         try:
             data = await reader.readexactly(3)
         except asyncio.IncompleteReadError as e:
@@ -214,6 +262,8 @@ def main():
     elif config['mode'] == 'aes-128-gcm':
         cipher = AES_128_GCM()
         cipher.load_key(config['key'])
+    else:
+        print("Unsupported mode",file=sys.stderr)
 
     local = Local(cipher)
     asyncio.ensure_future(local.connect_to_peer("ws://%s:%d" % (config['serverAddress'], config["serverPort"]),

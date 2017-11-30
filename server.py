@@ -77,6 +77,9 @@ class Stream:
                     logging.info("close writer : stream  %s" % self.stream_id)
                     if not self.writer.transport.is_closing():
                         self.writer.write_eof()
+                    if self.stream_id in self.server.stream_map:
+                        del self.server.stream_map[self.stream_id]
+
                     return
                 continue
 
@@ -89,13 +92,17 @@ class Stream:
             except ConnectionResetError:
                 if not self.writer.transport.is_closing():
                     self.writer.write_eof()
+                if self.stream_id in self.server.stream_map:
+                    del self.server.stream_map[self.stream_id]
+
                 return
 
     def rclose(self):
         self.write_and_close = True
         self.new_write_queue.set()
 
-        del self.server.stream_map[self.stream_id]
+        if self.stream_id in self.server.stream_map:
+            del self.server.stream_map[self.stream_id]
 
 
 class Server:
@@ -104,10 +111,13 @@ class Server:
         self.send_queue = asyncio.Queue()
         self.stream_map = {}
         self.cipher = cipher
+        self.close_tunnel = False
 
     async def run(self):
-        asyncio.ensure_future(self.send_to_peer())
+        send_task = asyncio.ensure_future(self.send_to_peer())
         await self.read_from_peer()
+        if self.close_tunnel:
+            send_task.cancel()
 
     async def send_to_peer(self):
         while True:
@@ -115,19 +125,24 @@ class Server:
             try:
                 await self.ws.send(self.cipher.encrypt(data))
             except websockets.exceptions.InvalidState as e:
-                print("Websocket InvalidState  %s" % e.args)
+                print("Websocket InvalidState : %s" % e.args)
                 return
 
     async def read_from_peer(self):
         while True:
             try:
                 data = await self.ws.recv()
-                data = self.cipher.decrypt(data)
             except websockets.exceptions.ConnectionClosed as e:
-                logging.info("Websocket ConnectionClosed %s" % e.args)
+                logging.info("Websocket ConnectionClosed : %s" % e.args)
+                return
+            try:
+                data = self.cipher.decrypt(data)
+            except ValueError as e:
+                logging.warning("Data is Invalid (Maybe GFW changed the packet): %s" % e.args)
                 return
             message = unpack(data)
-            ID = message['ID']
+            if 'ID' in message:
+                ID = message['ID']
             if "METHOD" in message:
                 if message["METHOD"] == "CONNECT":
                     stream = Stream(ID, message["ATYP"], message["REMOTE"], message["PORT"], self)
@@ -138,6 +153,10 @@ class Server:
                 elif message['METHOD'] == 'RCLOSE':
                     if ID in self.stream_map:
                         self.stream_map[ID].rclose()
+                elif message['METHOD'] == 'CLOSETUNNEL':
+                        self.close_tunnel = True
+                        return
+
             else:
                 logging.debug("new data from peer : Stream %s " % ID)
                 if ID in self.stream_map:
@@ -149,8 +168,12 @@ cipher = None
 
 
 async def new_ws_connection(ws, path):
-    server = Server(ws, copy.deepcopy(cipher))
-    await server.run()
+    server = Server(ws, cipher)
+    try:
+        await server.run()
+    except concurrent.futures.CancelledError as e:
+        logging.info("Close Tunnel : %s" % e.args)
+
 
 
 def main():
