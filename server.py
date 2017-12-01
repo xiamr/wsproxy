@@ -10,6 +10,7 @@ import argparse
 from cipher_algorithm import *
 import copy
 import sys
+import aiorwlock
 
 
 class Stream:
@@ -113,6 +114,7 @@ class UDPSession:
         self.atyp = atyp
         self.transport = None
 
+
     def connection_made(self, transport):
         self.transport = transport
 
@@ -134,6 +136,11 @@ class UDPSession:
         self.transport.sendto(message['DATA'])
         logging.info("Send one UDP data %s:%s" % tuple(message['REMOTE']))
 
+
+    def close(self):
+        self.transport.close()
+        self.to_close = True
+
 class UDPAssociate:
     def __init__(self, client_addr, client_port, udprelay ):
         self.client_addr = client_addr
@@ -142,24 +149,29 @@ class UDPAssociate:
 
         self.udpsession_map: dict[(str,int), UDPSession] = {}
 
+
     async def new_message_from_peer(self, message):
+
         if tuple(message['REMOTE']) not in self.udpsession_map:
             remote_addr , remote_port = tuple(message['REMOTE'])
             trasport, protocol = await \
                 asyncio.get_event_loop().create_datagram_endpoint(
                     lambda: UDPSession(self,remote_addr, remote_port, message['ATYP']),
                     remote_addr=tuple(message['REMOTE']))
+            protocol.new_message_from_peer(message)
             self.udpsession_map[tuple(message['REMOTE'])] = protocol
+        else:
+            self.udpsession_map[tuple(message['REMOTE'])].new_message_from_peer(message)
 
-        self.udpsession_map[tuple(message['REMOTE'])].new_message_from_peer(message)
 
     def datagram_received(self, message):
         message['CLIENT'] = (self.client_addr, self.client_port)
         self.udprelay.send_array.append(message)
         self.udprelay.send_array_semaphore.release()
 
-    def close(self):
-        for addr , session in self.udpsession_map.items():
+    async def close(self):
+
+        for addr, session in self.udpsession_map.items():
             session.transport.close()
 
 
@@ -183,9 +195,9 @@ class UDPRelay:
             message = self.send_array.pop(0)
             await self.server.send_queue.put(pack(message))
 
-    def closeAssociate(self, message):
+    async def closeAssociate(self, message):
         if tuple(message['CLIENT']) in self.udpassociate_map:
-            self.udpassociate_map[tuple(message['CLIENT'])].close()
+            await self.udpassociate_map[tuple(message['CLIENT'])].close()
             del self.udpassociate_map[tuple(message['CLIENT'])]
 
 
@@ -246,7 +258,8 @@ class Server:
                     if message['TYPE'] == 'DATA':
                         await self.udprelay.new_message_from_peer(message)
                     elif message['TYPE'] == 'CLOSE':
-                        self.udprelay.closeAssociate(message)
+                        await self.udprelay.closeAssociate(message)
+
 
                 elif message['METHOD'] == 'CLOSETUNNEL':
                         self.close_tunnel = True

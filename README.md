@@ -3,7 +3,8 @@ Socks5 Proxy over WebSocket
 
 
 TCP proxy and UDP proxy are both supported
-unlike to traditional shadowsocks, udp packets are encode in TCP stream 
+
+Unlike traditional shadowsocks, udp packets are encode in TCP stream 
 
 
 protocol hierarchy

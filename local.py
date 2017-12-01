@@ -57,7 +57,7 @@ class Stream:
         while True:
             try:
                 raw_data = await self.reader.read(8196)
-            except ConnectionResetError:
+            except ConnectionError:
                 logging.debug("send rclose message to peer : stream %s" % self.stream_id)
                 await self.local.send_queue.put(pack({"METHOD": "RCLOSE", "ID": self.stream_id}))
                 return
@@ -94,7 +94,7 @@ class Stream:
                 await self.writer.drain()
             except concurrent.futures.CancelledError:
                 raise
-            except ConnectionResetError:
+            except ConnectionError:
                 if not self.writer.transport.is_closing():
                     self.writer.write_eof()
                 if self.stream_id in self.local.stream_map:
@@ -164,7 +164,8 @@ class UDPAssociate:
                 remote_addr = socket.inet_ntop(socket.AF_INET, data[4:20])
                 remote_port = int.from_bytes(data[20:22], byteorder='big', signed=False)
 
-            logging.info("send udp data to remote %s:%s" % (remote_addr, remote_port))
+            logging.info("send udp data to remote %s:%s, %s:%s" %
+                         (remote_addr, remote_port, self.client_addr, self.client_port))
             await self.relay.send_queue.put(pack({'METHOD': 'UDP',
                                                   'TYPE': 'DATA',
                                                   'CLIENT': (self.client_addr, self.client_port),
@@ -213,14 +214,42 @@ class UDPRelay:
         self.transport = transport
 
     def datagram_received(self,data, addr):  #(ip:client_port)
+        logging.info("datagram_received from %s:%s"% addr)
         if addr in self.udpassociate_map:
             self.udpassociate_map[addr].new_data_from_client(data)
+            logging.info("Here")
+
+        else:
+            ip, port = addr
+            for client_addr , client_port in self.udpassociate_map:
+                if client_port == 0 and client_addr == '0.0.0.0':
+                    udp = self.udpassociate_map[('0.0.0.0',0)]
+                    udp.client_addr = ip
+                    udp.client_port = port
+                    self.udpassociate_map[addr] = udp
+                    udp.new_data_from_client(data)
+                    logging.info("udp data from %s:%s" %addr)
+                    logging.info("There")
+                    break
+
+                if client_port == port and client_addr == '0.0.0.0':
+                    udp = self.udpassociate_map[('0.0.0.0',port)]
+                    udp.client_addr = ip
+                    self.udpassociate_map[addr] = udp
+                    udp.new_data_from_client(data)
+                    logging.info("udp data from %s:%s" %addr)
+                    logging.info("There")
+                    break
+
+
+
 
     def error_received(self, exc):
         pass
 
     def addUDPAssociate(self, udpassocaite : UDPAssociate):
         # Only for IPv4
+        self.listenAddr = '127.0.0.1'
         try:
             ipaddr = ipaddress.ip_address(self.listenAddr)
             if isinstance(ipaddr,ipaddress.IPv4Address):
@@ -228,12 +257,12 @@ class UDPRelay:
             elif isinstance(ipaddr,ipaddress.IPv6Address):
                 addressbyte = b'\x04' + socket.inet_pton(socket.AF_INET6,self.listenAddr)
         except ValueError:
-            addressbyte = b'\x03' + len(self.listenAddr).to_bytes(1,byteorder='big',signed=False)
-        udpassocaite.writer.write(b'\x05\x00\x00\x01' + addressbyte +
+            raise SystemExit(1)
+        logging.info(addressbyte)
+        udpassocaite.writer.write(b'\x05\x00\x00' + addressbyte +
                                  self.listenPort.to_bytes(2, byteorder='big', signed=False))
         udpassocaite.addRelay(self)
-        if udpassocaite.client_addr == '0.0.0.0':
-            udpassocaite.client_addr = '127.0.0.1'
+
         self.udpassociate_map[(udpassocaite.client_addr, udpassocaite.client_port)] = udpassocaite
         logging.info("create new udp associate %s:%s" % (udpassocaite.client_addr, udpassocaite.client_port))
 
@@ -356,7 +385,13 @@ class Local:
             writer.close()
             return
         writer.write(b'\x05\x00')
-        data = await reader.read(256)
+        try:
+            data = await reader.readexactly(4)
+        except asyncio.IncompleteReadError as e:
+            print(e.args)
+            writer.close()
+            return
+
         if data[0] != 0x05:
             print("Not socks5", file=sys.stderr)
             writer.close()
@@ -364,36 +399,88 @@ class Local:
         if data[1] == 0x03:
             # UDP Associate
             if data[3] == 0x01:
-                client_addr = socket.inet_ntop(socket.AF_INET, data[4:8])
+                try:
+                    data = await reader.readexactly(4)
+                except asyncio.IncompleteReadError as e:
+                    print(e.args)
+                    writer.close()
+                    return
+
+                client_addr = socket.inet_ntop(socket.AF_INET, data)
                 atyp = "IPV4"
             elif data[3] == 0x04:
-                client_addr= socket.inet_ntop(socket.AF_INET6, data[4:20])
+                try:
+                    data = await reader.readexactly(16)
+                except asyncio.IncompleteReadError as e:
+                    print(e.args)
+                    writer.close()
+                    return
+
+                client_addr= socket.inet_ntop(socket.AF_INET6, data)
                 atyp = "IPV6"
             else:
                 print("Unsupported address type", file=sys.stderr)
                 writer.close()
                 return
+            try:
+                data =  await reader.readexactly(2)
+            except asyncio.IncompleteReadError as e:
+                print(e.args)
+                writer.close()
+                return
 
-            port = int.from_bytes(data[-2:], byteorder='big', signed=False)
+            port = int.from_bytes(data, byteorder='big', signed=False)
             udpassociate = UDPAssociate(reader,writer,atyp,client_addr,port)
             self.udprelay.addUDPAssociate(udpassociate)
 
         else:
             if data[3] == 0x01:
-                remote = socket.inet_ntop(socket.AF_INET, data[4:8])
+                try:
+                    data = await reader.readexactly(4)
+                except asyncio.IncompleteReadError as e:
+                    print(e.args)
+                    writer.close()
+                    return
+
+                remote = socket.inet_ntop(socket.AF_INET, data)
                 atyp = "IPV4"
             elif data[3] == 0x03:
-                remote = (data[5:-2]).decode()
+                try:
+                    data = await reader.readexactly(1)
+                except asyncio.IncompleteReadError as e:
+                    print(e.args)
+                    writer.close()
+                    return
+                try:
+                    data = await reader.readexactly(int.from_bytes(data,byteorder='big',signed=False))
+                except asyncio.IncompleteReadError as e:
+                    print(e.args)
+                    writer.close()
+                    return
+
+                remote = data.decode()
                 atyp = "DOMAINNAME"
             elif data[3] == 0x04:
-                remote = socket.inet_ntop(socket.AF_INET6, data[4:20])
+                try:
+                    data = await reader.readexactly(16)
+                except asyncio.IncompleteReadError as e:
+                    print(e.args)
+                    writer.close()
+                    return
+
+                remote = socket.inet_ntop(socket.AF_INET6, data)
                 atyp = "IPV6"
             else:
                 print("Unsupported address type")
                 writer.close()
                 return
-
-            port = int.from_bytes(data[-2:], byteorder='big', signed=False)
+            try:
+                data = await reader.readexactly(2)
+            except asyncio.IncompleteReadError as e:
+                print(e.args)
+                writer.close()
+                return
+            port = int.from_bytes(data, byteorder='big', signed=False)
 
             fd = writer.get_extra_info('socket').fileno()
             stream = Stream(reader, writer, atyp, remote, port, fd, self)
