@@ -147,7 +147,6 @@ def encode_msg(**kwargs):
     return pack(message)
 
 
-
 class Replace:
     def __init__(self):
         pass
@@ -176,6 +175,7 @@ class Replace:
         for i in range(len(self.key)):
             key_array[self.key[i]] = i
         self.ukey = bytes(key_array)
+
 
 class AES_128_GCM:
     def __init__(self):

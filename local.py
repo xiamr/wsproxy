@@ -173,7 +173,7 @@ class UDPAssociate:
                 remote_port = int.from_bytes(data[5+data[4]:7+data[4]], byteorder='big', signed=False)
             elif data[3] == 0x04:
                 remote_addr_type = AddressType.IPv6
-                remote_addr = socket.inet_ntop(socket.AF_INET, data[4:20])
+                remote_addr = socket.inet_ntop(socket.AF_INET6, data[4:20])
                 remote_port = int.from_bytes(data[20:22], byteorder='big', signed=False)
 
             logging.info("send udp data to remote_addr %s:%s, %s:%s" %
