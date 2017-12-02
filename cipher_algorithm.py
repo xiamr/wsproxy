@@ -74,6 +74,8 @@ class MsgType(enum.Enum):
     UDPClose = 'UDPCLOSE'
     CloseTunnel = 'CLOSETUNNEL'
     Data = 'DATA'
+    DNSRequest = 'DNSREQUEST'
+    DNSReplay = 'DNSREPLAY'
 
 
 class Msg:
@@ -110,6 +112,10 @@ def decode_msg(data):
         msg.data = message['DATA']
     elif msg.msgtype == MsgType.CloseTunnel:
         pass
+    elif msg.msgtype == MsgType.DNSRequest:
+        msg.data = message['DATA']
+    elif msg.msgtype == MsgType.DNSReplay:
+        msg.data = message['DATA']
     return msg
 
 
@@ -143,6 +149,10 @@ def encode_msg(**kwargs):
         message['DATA'] = kwargs['data']
     elif msgtype == MsgType.CloseTunnel:
         pass
+    elif msgtype == MsgType.DNSRequest:
+        message['DATA'] = kwargs['data']
+    elif msgtype == MsgType.DNSReplay:
+        message['DATA'] = kwargs['data']
 
     return pack(message)
 

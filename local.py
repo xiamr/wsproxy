@@ -278,6 +278,40 @@ class UDPRelay:
                 msg.data ,msg.remote_addr,msg.remote_port, msg.remote_addr_type)
 
 
+class DNSRelay:
+    def __init__(self, local):
+        self.transaction_map: dict[bytes,(str,int)] = {}
+        self.local = local
+        self.data_array_semaphore = asyncio.Semaphore(0)
+        self.data_array = []
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self,data, addr):  #(ip:client_port)
+        remote_addr = addr[0]
+        remote_port = addr[1]
+        logging.info("DNS request from %s:%s" % (addr_convet(remote_addr),remote_port))
+        self.transaction_map[data[:2]] = (remote_addr, remote_port)
+        self.data_array.append(data)
+        self.data_array_semaphore.release()
+
+    async def run(self):
+        while True:
+            await self.data_array_semaphore.acquire()
+            logging.info('send DNS request')
+            await self.local.send_queue.put(encode_msg(msgtype=MsgType.DNSRequest,
+                                             data=self.data_array.pop(0)))
+
+    def replay_from_peer(self, msg):
+        try:
+            self.transport.sendto(msg.data, self.transaction_map.pop(msg.data[:2]))
+        except KeyError:
+            pass
+
+    def error_received(self, exc):
+        pass
+
 
 class Local:
     def __init__(self, cipher):
@@ -288,8 +322,9 @@ class Local:
         self.last_active_time = datetime.now()
         self.close_tunnel = False
 
-        self.udprelay = None
+        self.udprelay: UDPRelay = None
 
+        self.dnsrelay: DNSRelay = None
 
     async def send_to_peer(self):
         while True:
@@ -330,6 +365,8 @@ class Local:
                 if msg.stream_id in self.stream_map:
                     await self.stream_map[msg.stream_id].write_queue.put(msg)
                     self.stream_map[msg.stream_id].write_queue_event.set()
+            elif msg.msgtype == MsgType.DNSReplay:
+                self.dnsrelay.replay_from_peer(msg)
 
     async def connect_to_peer(self, serverAddress, serverPort, listenAddress, listenPort, reconnect=False):
 
@@ -350,6 +387,13 @@ class Local:
                 asyncio.get_event_loop().create_datagram_endpoint(
                     lambda: UDPRelay(self,self.listenAddres,self.listenPort),
                        local_addr=(listenAddress, listenPort))
+            transport, self.dnsrelay = await  \
+                asyncio.get_event_loop().create_datagram_endpoint(
+                    lambda: DNSRelay(self),
+                    local_addr=(listenAddress,53))
+
+            asyncio.ensure_future(self.dnsrelay.run())
+
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
         asyncio.ensure_future(self.check_connection())

@@ -204,6 +204,36 @@ class UDPRelay:
             del self.udpassociate_map[(msg.client_addr, msg.client_port)]
 
 
+class DNSRelay:
+    def __init__(self, server):
+        self.server = server
+        self.send_array = []
+        self.send_array_semaphore = asyncio.Semaphore(0)
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self,data, addr):
+        logging.info("recv dns replay ")
+        self.send_array.append(data)
+        self.send_array_semaphore.release()
+
+    async def run(self):
+        while True:
+            await self.send_array_semaphore.acquire()
+            await self.server.send_queue.put(encode_msg(msgtype=MsgType.DNSReplay,
+                                                        data=self.send_array.pop(0)))
+
+    def new_request_from_peer(self,msg):
+        logging.info('new dns request')
+        self.transport.sendto(msg.data)
+
+    def error_received(self, exc):
+        pass
+
+    def connection_lost(self, exc):
+        pass
+
 
 class Server:
     def __init__(self, ws, cipher):
@@ -217,11 +247,18 @@ class Server:
 
     async def run(self):
         send_task = asyncio.ensure_future(self.send_to_peer())
+
+        trasport, self.dnsrelay = await \
+            asyncio.get_event_loop().create_datagram_endpoint(
+                lambda: DNSRelay(self), remote_addr=('8.8.8.8', 53))
+
+        self.dnsrelay_run_task = asyncio.ensure_future(self.dnsrelay.run())
         await self.read_from_peer()
         if self.close_tunnel:
             send_task.cancel()
 
         self.udprelay_run_task.cancel()
+        self.dnsrelay_run_task.cancel()
 
     async def send_to_peer(self):
         while True:
@@ -266,6 +303,8 @@ class Server:
                 if msg.stream_id in self.stream_map:
                     await self.stream_map[msg.stream_id].write_queue.put(msg)
                     self.stream_map[msg.stream_id].write_queue_event.set()
+            elif msg.msgtype == MsgType.DNSRequest:
+                self.dnsrelay.new_request_from_peer(msg)
 
 
 cipher = None
