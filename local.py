@@ -56,7 +56,7 @@ class Stream:
     async def read_from_client(self):
         while True:
             try:
-                raw_data = await self.reader.read(819600)
+                raw_data = await self.reader.read(8196)
             except ConnectionError:
                 logging.info("send rclose message to peer : stream %s" % self.stream_id)
                 await self.local.send_queue.put(encode_msg(msgtype=MsgType.RClose,
@@ -70,7 +70,6 @@ class Stream:
                                                                stream_id=self.stream_id))
                     return
 
-            logging.info("receive some data from client: stream %s" % self.stream_id)
             await self.local.send_queue.put(encode_msg(msgtype=MsgType.Data,
                                                        stream_id=self.stream_id,
                                                        data=raw_data))
@@ -291,6 +290,7 @@ class Local:
 
         self.udprelay = None
 
+
     async def send_to_peer(self):
         while True:
             data = await self.send_queue.get()
@@ -332,15 +332,8 @@ class Local:
                     self.stream_map[msg.stream_id].write_queue_event.set()
 
     async def connect_to_peer(self, serverAddress, serverPort, listenAddress, listenPort, reconnect=False):
-        try:
-            ip = ipaddress.ip_address(serverAddress)
-            if isinstance(ip,ipaddress.IPv4Address):
-                self.uri = "ws://%s:%s" % (serverAddress, serverPort)
-            else:
-                self.uri = "ws://[%s]:%s" % (serverAddress, serverPort)
-        except:
-            self.uri = "ws://%s:%s" % (serverAddress, serverPort)
 
+        self.uri = "ws://%s:%s" % (addr_convet(serverAddress), serverPort)
         self.listenAddres = listenAddress
         self.listenPort = listenPort
         try:
@@ -352,7 +345,7 @@ class Local:
         print("websockets connection established !")
 
         if not reconnect:
-            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, listenAddress, listenPort))
+            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, "0.0.0.0", listenPort))
             transport, self.udprelay = await \
                 asyncio.get_event_loop().create_datagram_endpoint(
                     lambda: UDPRelay(self,self.listenAddres,self.listenPort),

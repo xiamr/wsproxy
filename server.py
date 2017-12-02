@@ -38,7 +38,8 @@ class Stream:
         try:
             self.reader, self.writer = await asyncio.open_connection(self.remote_addr, self.remote_port)
         except OSError as e:
-            logging.info("connect to %s:%s failed %s: stream %s" % (addr_convet(self.remote_addr), self.remote_port, e.args, self.stream_id))
+            logging.info("connect to %s:%s failed %s: stream %s" % (addr_convet(self.remote_addr),
+                                                                    self.remote_port, e.args, self.stream_id))
             await self.server.send_queue.put(encode_msg(msgtype=MsgType.Connection_Failure,
                                                         stream_id=self.stream_id))
             if self.stream_id in self.server.stream_map:
@@ -55,7 +56,7 @@ class Stream:
     async def read_from_server(self):
         while True:
             try:
-                raw_data = await self.reader.read(819600)
+                raw_data = await self.reader.read(8196)
             except ConnectionError:
                 logging.debug("send rclose message to peer : stream %s" % self.stream_id)
                 await self.server.send_queue.put(encode_msg(msgtype=MsgType.RClose,
@@ -67,7 +68,6 @@ class Stream:
                     await self.server.send_queue.put(encode_msg(msgtype=MsgType.RClose,
                                                                 stream_id=self.stream_id))
                     return
-            logging.debug("recv some data from server : Stream %s" % self.stream_id)
             await self.server.send_queue.put(encode_msg(msgtype=MsgType.Data,
                                                         stream_id=self.stream_id,
                                                         data=raw_data))
@@ -111,6 +111,7 @@ class Stream:
 
         if self.stream_id in self.server.stream_map:
             del self.server.stream_map[self.stream_id]
+
 
 class UDPSession:
     def __init__(self, udpassociate, remote_addr, remote_port, remote_addr_type):

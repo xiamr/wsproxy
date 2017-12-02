@@ -127,7 +127,7 @@ def encode_msg(**kwargs):
     elif msgtype == MsgType.Connection_OK:
         message['STREAMID'] = kwargs['stream_id']
     elif msgtype == MsgType.Connection_Failure:
-        message['DATA'] = kwargs['data']
+        message['STREAMID'] = kwargs['stream_id']
     elif msgtype == MsgType.UDP:
         message['CLIENTADDR'] = kwargs['client_addr']
         message['CLIENTPORT'] = kwargs['client_port']
