@@ -7,9 +7,10 @@ import socket
 import logging
 import concurrent.futures
 import argparse
-from cipher_algorithm import *
+from misc import *
 import sys
 from datetime import *
+
 
 
 class Stream:
@@ -34,21 +35,21 @@ class Stream:
         self.write_and_close = False
 
     async def run(self):
-        logging.info("start new stream : %s, %s:%s" % (self.stream_id, addr_convet(self.remote_addr), self.remote_port))
+        logging.info("start new stream : %s, %s:%s" % (self.stream_id, addr_convert(self.remote_addr), self.remote_port))
         await self.local.send_queue.put(encode_msg(msgtype=MsgType.Connect,
                                                    remote_addr_type=self.remote_address_type,
                                                    remote_addr=self.remote_addr,
                                                    remote_port=self.remote_port,
-                                                   stream_id=self.stream_id))
+                                                   stream_id=self.stream_id), emergy=True)
 
     def connection_established(self):
-        logging.info("new stream connected : %s, remote_addr: %s:%s" % (self.stream_id, addr_convet(self.remote_addr), self.remote_port))
+        logging.info("new stream connected : %s, remote_addr: %s:%s" % (self.stream_id, addr_convert(self.remote_addr), self.remote_port))
         self.writer.write(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
         self.read_task = asyncio.ensure_future(self.read_from_client())
         self.write_task = asyncio.ensure_future(self.write_to_client())
 
     def connection_failure(self):
-        logging.info("new stream connect failed : %s, %s:%s" % (self.stream_id, addr_convet(self.remote_addr), self.remote_port))
+        logging.info("new stream connect failed : %s, %s:%s" % (self.stream_id, addr_convert(self.remote_addr), self.remote_port))
         self.writer.write(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
         self.writer.close()
         del self.local.stream_map[self.stream_id]
@@ -143,7 +144,7 @@ class UDPAssociate:
                 await self.relay.send_queue.put(encode_msg(msgtype=MsgType.UDPClose,
                                                            client_addr=self.client_addr,
                                                            client_port=self.client_port))
-                logging.info("close udp associate : %s:%s" % (addr_convet(self.client_addr), self.client_port))
+                logging.info("close udp associate : %s:%s" % (addr_convert(self.client_addr), self.client_port))
                 del self.relay.udpassociate_map[(self.client_addr, self.client_port)]
             return
 
@@ -153,10 +154,10 @@ class UDPAssociate:
                 await self.relay.send_queue.put(encode_msg(msgtype=MsgType.UDPClose,
                                                            client_addr=self.client_addr,
                                                            client_port=self.client_port))
-                logging.info("close udp associate : %s:%s" % (addr_convet(self.client_addr), self.client_port))
+                logging.info("close udp associate : %s:%s" % (addr_convert(self.client_addr), self.client_port))
                 del self.relay.udpassociate_map[(self.client_addr, self.client_port)]
             return
-        logging.warning("some problem happened:  data = %s, client = %s:%s" % (data, addr_convet(self.client_addr), self.client_port))
+        logging.warning("some problem happened:  data = %s, client = %s:%s" % (data, addr_convert(self.client_addr), self.client_port))
 
     async def run(self):
         while True:
@@ -176,7 +177,7 @@ class UDPAssociate:
                 remote_port = int.from_bytes(data[20:22], byteorder='big', signed=False)
 
             logging.info("send udp data to remote_addr %s:%s, %s:%s" %
-                         (remote_addr, remote_port, addr_convet(self.client_addr), self.client_port))
+                         (remote_addr, remote_port, addr_convert(self.client_addr), self.client_port))
 
             await self.relay.send_queue.put(encode_msg(msgtype=MsgType.UDP,
                                                        client_addr=self.client_addr,
@@ -228,7 +229,7 @@ class UDPRelay:
     def datagram_received(self,data, addr):  #(ip:client_port)
         remote_addr = addr[0]
         remote_port = addr[1]
-        logging.info("datagram_received from %s:%s" % (addr_convet(remote_addr),remote_port))
+        logging.info("datagram_received from %s:%s" % (addr_convert(remote_addr), remote_port))
         if (remote_addr,remote_port) in self.udpassociate_map:
             self.udpassociate_map[(remote_addr,remote_port)].new_data_from_client(data)
         else:
@@ -280,7 +281,7 @@ class UDPRelay:
 
 class DNSRelay:
     def __init__(self, local):
-        self.transaction_map: dict[bytes,(str,int)] = {}
+        self.transaction_map: dict[bytes, (str, int)] = {}
         self.local = local
         self.data_array_semaphore = asyncio.Semaphore(0)
         self.data_array = []
@@ -291,17 +292,25 @@ class DNSRelay:
     def datagram_received(self,data, addr):  #(ip:client_port)
         remote_addr = addr[0]
         remote_port = addr[1]
-        logging.info("DNS request from %s:%s" % (addr_convet(remote_addr),remote_port))
+        logging.info("DNS request from %s:%s" % (addr_convert(remote_addr), remote_port))
         self.transaction_map[data[:2]] = (remote_addr, remote_port)
+        asyncio.ensure_future(self.delete_transaction(data[:2]))
         self.data_array.append(data)
         self.data_array_semaphore.release()
+
+    async def delete_transaction(self, tid):
+        await asyncio.sleep(60)
+        try:
+            del self.transaction_map[tid]
+        except KeyError:
+            pass
 
     async def run(self):
         while True:
             await self.data_array_semaphore.acquire()
             logging.info('send DNS request')
             await self.local.send_queue.put(encode_msg(msgtype=MsgType.DNSRequest,
-                                             data=self.data_array.pop(0)))
+                                             data=self.data_array.pop(0)), emergy=True)
 
     def replay_from_peer(self, msg):
         try:
@@ -317,7 +326,7 @@ class Local:
     def __init__(self, cipher):
         self.ws = None
         self.stream_map = {}
-        self.send_queue = asyncio.Queue()
+        self.send_queue = TwoPrioQueue()
         self.cipher = cipher
         self.last_active_time = datetime.now()
         self.close_tunnel = False
@@ -368,9 +377,10 @@ class Local:
             elif msg.msgtype == MsgType.DNSReplay:
                 self.dnsrelay.replay_from_peer(msg)
 
-    async def connect_to_peer(self, serverAddress, serverPort, listenAddress, listenPort, reconnect=False):
+    async def connect_to_peer(self, serverAddress, serverPort,
+                              listenAddress, listenPort, dnsrelay: bool, reconnect=False):
 
-        self.uri = "ws://%s:%s" % (addr_convet(serverAddress), serverPort)
+        self.uri = "ws://%s:%s" % (addr_convert(serverAddress), serverPort)
         self.listenAddres = listenAddress
         self.listenPort = listenPort
         try:
@@ -387,12 +397,13 @@ class Local:
                 asyncio.get_event_loop().create_datagram_endpoint(
                     lambda: UDPRelay(self,self.listenAddres,self.listenPort),
                        local_addr=(listenAddress, listenPort))
-            transport, self.dnsrelay = await  \
-                asyncio.get_event_loop().create_datagram_endpoint(
-                    lambda: DNSRelay(self),
-                    local_addr=(listenAddress,53))
+            if dnsrelay:
+                transport, self.dnsrelay = await  \
+                    asyncio.get_event_loop().create_datagram_endpoint(
+                        lambda: DNSRelay(self),
+                        local_addr=(listenAddress,53))
 
-            asyncio.ensure_future(self.dnsrelay.run())
+                asyncio.ensure_future(self.dnsrelay.run())
 
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
@@ -560,7 +571,8 @@ def main():
 
     local = Local(cipher)
     asyncio.ensure_future(local.connect_to_peer(config['serverAddress'], config["serverPort"],
-                                                config['localAddress'], config["localPort"]))
+                                                config['localAddress'], config["localPort"],
+                                                config.pop('dnsrelay',False)))
     loop.run_forever()
 
 

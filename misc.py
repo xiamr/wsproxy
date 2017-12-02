@@ -12,10 +12,70 @@ import logging
 import traceback
 import pickle
 import ipaddress
+import asyncio
 
 
+class TwoPrioQueue:
+    def __init__(self,maxsize = 0):
+        self.emergy_queue = []
+        self.ordinary_queue = []
+        self.put_event = asyncio.Event()
+        self.get_event = asyncio.Event()
+        self.maxsize = maxsize
 
-def addr_convet(address):
+    async def put(self, item, emergy=False):
+        if self.full():
+            self.get_event.clear()
+            await self.get_event.wait()
+        self.get_event.clear()
+        if emergy:
+            self.emergy_queue.append(item)
+        else:
+            self.ordinary_queue.append(item)
+        self.put_event.set()
+
+    async def get(self):
+        if self.empty():
+            self.put_event.clear()
+            await self.put_event.wait()
+        self.put_event.clear()
+        self.get_event.set()
+        if len(self.emergy_queue) > 0:
+            return self.emergy_queue.pop(0)
+        return self.ordinary_queue.pop(0)
+
+    def qsize(self):
+        return len(self.emergy_queue) + len(self.ordinary_queue)
+
+    def empty(self):
+        return self.qsize() == 0
+
+    def full(self):
+        if self.maxsize > 0:
+            return self.qsize() == self.maxsize
+        return False
+
+    def get_nowait(self):
+        if self.empty():
+            raise asyncio.QueueEmpty()
+        else:
+            self.get_event.set()
+            if len(self.emergy_queue) > 0:
+                return self.emergy_queue.pop(0)
+            return self.ordinary_queue.pop(0)
+
+    def put_nowait(self, item, emergy=False):
+        if self.full():
+            raise asyncio.QueueFull()
+        else:
+            if emergy:
+                self.emergy_queue.append(item)
+            else:
+                self.ordinary_queue.append(item)
+        self.put_event.set()
+
+
+def addr_convert(address):
     try:
         ipaddr = ipaddress.ip_address(address)
         if isinstance(ipaddr, ipaddress.IPv6Address):
@@ -23,6 +83,7 @@ def addr_convet(address):
     except:
         pass
     return address
+
 
 PUBLIC_ENUMS = {}
 

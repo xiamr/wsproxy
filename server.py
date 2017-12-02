@@ -7,7 +7,7 @@ import json
 import logging
 import concurrent.futures
 import argparse
-from cipher_algorithm import *
+from misc import *
 import copy
 import sys
 
@@ -34,21 +34,21 @@ class Stream:
         self.write_and_close = False
 
     async def run(self):
-        logging.info("connect to %s:%s ... : stream %s " % (addr_convet(self.remote_addr), self.remote_port, self.stream_id))
+        logging.info("connect to %s:%s ... : stream %s " % (addr_convert(self.remote_addr), self.remote_port, self.stream_id))
         try:
             self.reader, self.writer = await asyncio.open_connection(self.remote_addr, self.remote_port)
         except OSError as e:
-            logging.info("connect to %s:%s failed %s: stream %s" % (addr_convet(self.remote_addr),
+            logging.info("connect to %s:%s failed %s: stream %s" % (addr_convert(self.remote_addr),
                                                                     self.remote_port, e.args, self.stream_id))
             await self.server.send_queue.put(encode_msg(msgtype=MsgType.Connection_Failure,
-                                                        stream_id=self.stream_id))
+                                                        stream_id=self.stream_id),emergy=True)
             if self.stream_id in self.server.stream_map:
                 del self.server.stream_map[self.stream_id]
             return
 
-        logging.info("connect to %s:%s succeeded : stream %s" % (addr_convet(self.remote_addr), self.remote_port, self.stream_id))
+        logging.info("connect to %s:%s succeeded : stream %s" % (addr_convert(self.remote_addr), self.remote_port, self.stream_id))
         await self.server.send_queue.put(encode_msg(msgtype=MsgType.Connection_OK,
-                                                    stream_id=self.stream_id))
+                                                    stream_id=self.stream_id),emergy=True)
 
         self.write_task = asyncio.ensure_future(self.write_to_server())
         self.read_task = asyncio.ensure_future(self.read_from_server())
@@ -222,7 +222,7 @@ class DNSRelay:
         while True:
             await self.send_array_semaphore.acquire()
             await self.server.send_queue.put(encode_msg(msgtype=MsgType.DNSReplay,
-                                                        data=self.send_array.pop(0)))
+                                                        data=self.send_array.pop(0)),emergy=True)
 
     def new_request_from_peer(self,msg):
         logging.info('new dns request')
@@ -236,21 +236,22 @@ class DNSRelay:
 
 
 class Server:
-    def __init__(self, ws, cipher):
+    def __init__(self, ws, cipher, normal_dns):
         self.ws = ws
-        self.send_queue = asyncio.Queue()
+        self.send_queue = TwoPrioQueue()
         self.stream_map = {}
         self.cipher = cipher
         self.close_tunnel = False
         self.udprelay = UDPRelay(self)
         self.udprelay_run_task = asyncio.ensure_future(self.udprelay.run())
+        self.normal_dns = normal_dns
 
     async def run(self):
         send_task = asyncio.ensure_future(self.send_to_peer())
 
         trasport, self.dnsrelay = await \
             asyncio.get_event_loop().create_datagram_endpoint(
-                lambda: DNSRelay(self), remote_addr=('8.8.8.8', 53))
+                lambda: DNSRelay(self), remote_addr=(self.normal_dns, 53))
 
         self.dnsrelay_run_task = asyncio.ensure_future(self.dnsrelay.run())
         await self.read_from_peer()
@@ -287,7 +288,7 @@ class Server:
             if msg.msgtype == MsgType.Connect:
                 stream = Stream(msg.stream_id, msg.remote_addr_type, msg.remote_addr, msg.remote_port, self)
                 self.stream_map[msg.stream_id] = stream
-                logging.info("new stream: %s, remote_addr %s:%s" % (msg.stream_id, addr_convet(msg.remote_addr), msg.remote_port))
+                logging.info("new stream: %s, remote_addr %s:%s" % (msg.stream_id, addr_convert(msg.remote_addr), msg.remote_port))
                 asyncio.ensure_future(stream.run())
             elif msg.msgtype == MsgType.RClose:
                 if msg.stream_id in self.stream_map:
@@ -308,10 +309,11 @@ class Server:
 
 
 cipher = None
+normal_dns = None
 
 
 async def new_ws_connection(ws, path):
-    server = Server(ws, cipher)
+    server = Server(ws, cipher,normal_dns)
     try:
         await server.run()
     except concurrent.futures.CancelledError as e:
@@ -321,7 +323,7 @@ async def new_ws_connection(ws, path):
 
 
 def main():
-    global cipher
+    global cipher, normal_dns
 
     parser = argparse.ArgumentParser(description="Server part for crossing the GFW")
     parser.add_argument('-c', '--config', help="config file", default='config.json')
@@ -345,9 +347,10 @@ def main():
     else:
         print("Unsupported mode",file=sys.stderr)
 
+    normal_dns = config.pop('normal_dns','8.8.8.8')
+
     loop = asyncio.get_event_loop()
-    asyncio.ensure_future(websockets.serve(new_ws_connection, "0.0.0.0", config["serverPort"]))
-    asyncio.ensure_future(websockets.serve(new_ws_connection, "::", config["serverPort"]))
+    asyncio.ensure_future(websockets.serve(new_ws_connection, config["serverAddress"], config["serverPort"]))
 
     loop.run_forever()
 

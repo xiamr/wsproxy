@@ -6,6 +6,7 @@ TCP proxy and UDP proxy are both supported
 
 Unlike traditional shadowsocks, udp packets are encode in TCP stream 
 
+DNS tunnel is added
 
 protocol hierarchy
         
