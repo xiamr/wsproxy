@@ -10,23 +10,23 @@ import argparse
 from cipher_algorithm import *
 import copy
 import sys
-import aiorwlock
+
 
 
 class Stream:
-    def __init__(self, stream_id, atyp, remote, port, server):
+    def __init__(self, stream_id, remote_addr_type: AddressType, remote_addr, remote_port, server ):
         self.stream_id = stream_id
-        self.atyp = atyp
-        self.remote = remote
-        self.port = port
+        self.remote_addr_type = remote_addr_type
+        self.remote_addr = remote_addr
+        self.remote_port = remote_port
         self.server = server
 
-        self.reader = None
-        self.writer = None
+        self.reader: asyncio.StreamReader = None
+        self.writer: asyncio.StreamWriter = None
 
         self.write_queue = asyncio.Queue()
-        self.new_write_queue = asyncio.Event()
-        self.new_write_queue.set()
+        self.write_queue_event = asyncio.Event()
+        self.write_queue_event.set()
 
         self.read_task = None
         self.write_task = None
@@ -34,18 +34,20 @@ class Stream:
         self.write_and_close = False
 
     async def run(self):
-        logging.info("connect to %s:%s ... : stream %s " % (self.remote, self.port, self.stream_id))
+        logging.info("connect to %s:%s ... : stream %s " % (addr_convet(self.remote_addr), self.remote_port, self.stream_id))
         try:
-            self.reader, self.writer = await asyncio.open_connection(self.remote, self.port)
+            self.reader, self.writer = await asyncio.open_connection(self.remote_addr, self.remote_port)
         except OSError as e:
-            logging.info("connect to %s:%s failed %s: stream %s" % (self.remote, self.port, e.args, self.stream_id))
-            await self.server.send_queue.put(pack({'METHOD': 'CONNECTIONFAILURE', 'ID': self.stream_id}))
+            logging.info("connect to %s:%s failed %s: stream %s" % (addr_convet(self.remote_addr), self.remote_port, e.args, self.stream_id))
+            await self.server.send_queue.put(encode_msg(msgtype=MsgType.Connection_Failure,
+                                                        stream_id=self.stream_id))
             if self.stream_id in self.server.stream_map:
                 del self.server.stream_map[self.stream_id]
             return
 
-        logging.info("connect to %s:%s succeeded : stream %s" % (self.port, self.remote, self.stream_id))
-        await self.server.send_queue.put(pack({'METHOD': "CONNECTIONOK", 'ID': self.stream_id}))
+        logging.info("connect to %s:%s succeeded : stream %s" % (addr_convet(self.remote_addr), self.remote_port, self.stream_id))
+        await self.server.send_queue.put(encode_msg(msgtype=MsgType.Connection_OK,
+                                                    stream_id=self.stream_id))
 
         self.write_task = asyncio.ensure_future(self.write_to_server())
         self.read_task = asyncio.ensure_future(self.read_from_server())
@@ -53,28 +55,32 @@ class Stream:
     async def read_from_server(self):
         while True:
             try:
-                raw_data = await self.reader.read(8196)
-            except ConnectionResetError:
+                raw_data = await self.reader.read(819600)
+            except ConnectionError:
                 logging.debug("send rclose message to peer : stream %s" % self.stream_id)
-                await self.server.send_queue.put(pack({"METHOD": "RCLOSE", "ID": self.stream_id}))
+                await self.server.send_queue.put(encode_msg(msgtype=MsgType.RClose,
+                                                            stream_id=self.stream_id))
                 return
             if len(raw_data) == 0:
                 if self.reader.at_eof():
                     logging.debug("send rclose message to peer : stream %s" % self.stream_id)
-                    await self.server.send_queue.put(pack({"METHOD": "RCLOSE", "ID": self.stream_id}))
+                    await self.server.send_queue.put(encode_msg(msgtype=MsgType.RClose,
+                                                                stream_id=self.stream_id))
                     return
             logging.debug("recv some data from server : Stream %s" % self.stream_id)
-            await self.server.send_queue.put(pack({"ID": self.stream_id, "DATA": raw_data}))
+            await self.server.send_queue.put(encode_msg(msgtype=MsgType.Data,
+                                                        stream_id=self.stream_id,
+                                                        data=raw_data))
 
     async def write_to_server(self):
         while True:
 
             if not self.write_and_close:
-                await self.new_write_queue.wait()
+                await self.write_queue_event.wait()
             try:
-                message = self.write_queue.get_nowait()
+                msg = self.write_queue.get_nowait()
             except asyncio.queues.QueueEmpty:
-                self.new_write_queue.clear()
+                self.write_queue_event.clear()
                 if self.write_and_close:
                     logging.info("close writer : stream  %s" % self.stream_id)
                     if not self.writer.transport.is_closing():
@@ -86,12 +92,12 @@ class Stream:
                 continue
 
             logging.debug("send some data to server: stream %s" % self.stream_id)
-            self.writer.write(message["DATA"])
+            self.writer.write(msg.data)
             try:
                 await self.writer.drain()
             except concurrent.futures.CancelledError:
                 raise
-            except ConnectionResetError:
+            except ConnectionError:
                 if not self.writer.transport.is_closing():
                     self.writer.write_eof()
                 if self.stream_id in self.server.stream_map:
@@ -101,17 +107,17 @@ class Stream:
 
     def rclose(self):
         self.write_and_close = True
-        self.new_write_queue.set()
+        self.write_queue_event.set()
 
         if self.stream_id in self.server.stream_map:
             del self.server.stream_map[self.stream_id]
 
 class UDPSession:
-    def __init__(self, udpassociate , remote_addr, remote_port, atyp):
+    def __init__(self, udpassociate, remote_addr, remote_port, remote_addr_type):
         self.udpassociate = udpassociate
         self.remote_addr = remote_addr
         self.remote_port = remote_port
-        self.atyp = atyp
+        self.remote_addr_type = remote_addr_type
         self.transport = None
 
 
@@ -120,11 +126,8 @@ class UDPSession:
 
     def datagram_received(self,data, addr):
         logging.info("recv udp data from server %s:%s " %(self.remote_addr,self.remote_port))
-        self.udpassociate.datagram_received({'METHOD': 'UDP',
-                                            'TYPE': 'DATA',
-                                            'REMOTE': (self.remote_addr,self.remote_port),
-                                             'ATYP': self.atyp,
-                                            'DATA': data})
+        self.udpassociate.datagram_received(self.remote_addr_type, self.remote_addr,self.remote_port,data)
+
 
     def error_received(self, exc):
         pass
@@ -132,9 +135,9 @@ class UDPSession:
     def connection_lost(self, exc):
         pass
 
-    def new_message_from_peer(self, message):
-        self.transport.sendto(message['DATA'])
-        logging.info("Send one UDP data %s:%s" % tuple(message['REMOTE']))
+    def new_message_from_peer(self, msg):
+        self.transport.sendto(msg.data)
+        logging.info("Send one UDP data %s:%s" % (msg.remote_addr, msg.remote_port))
 
 
     def close(self):
@@ -149,24 +152,24 @@ class UDPAssociate:
 
         self.udpsession_map: dict[(str,int), UDPSession] = {}
 
-
-    async def new_message_from_peer(self, message):
-
-        if tuple(message['REMOTE']) not in self.udpsession_map:
-            remote_addr , remote_port = tuple(message['REMOTE'])
+    async def new_message_from_peer(self, msg):
+        if (msg.remote_addr, msg.remote_port) not in self.udpsession_map:
             trasport, protocol = await \
                 asyncio.get_event_loop().create_datagram_endpoint(
-                    lambda: UDPSession(self,remote_addr, remote_port, message['ATYP']),
-                    remote_addr=tuple(message['REMOTE']))
-            protocol.new_message_from_peer(message)
-            self.udpsession_map[tuple(message['REMOTE'])] = protocol
-        else:
-            self.udpsession_map[tuple(message['REMOTE'])].new_message_from_peer(message)
+                    lambda: UDPSession(self, msg.remote_addr, msg.remote_port, msg.remote_addr_type),
+                    remote_addr=(msg.remote_addr,msg.remote_port))
+            self.udpsession_map[(msg.remote_addr,msg.remote_port)] = protocol
 
+        self.udpsession_map[(msg.remote_addr,msg.remote_port)].new_message_from_peer(msg)
 
-    def datagram_received(self, message):
-        message['CLIENT'] = (self.client_addr, self.client_port)
-        self.udprelay.send_array.append(message)
+    def datagram_received(self, remote_addr_type, remote_addr, remote_port, data):
+        self.udprelay.send_array.append(encode_msg(msgtype=MsgType.UDP,
+                                                   remote_addr_type=remote_addr_type,
+                                                   remote_addr=remote_addr,
+                                                   remote_port=remote_port,
+                                                   client_addr=self.client_addr,
+                                                   client_port=self.client_port,
+                                                   data=data))
         self.udprelay.send_array_semaphore.release()
 
     async def close(self):
@@ -183,22 +186,21 @@ class UDPRelay:
         self.send_array = []
         self.send_array_semaphore = asyncio.Semaphore(0)
 
-    async def new_message_from_peer(self,message):
-        if tuple(message['CLIENT']) not in self.udpassociate_map:
-            client_addr, client_port = tuple(message['CLIENT'])
-            self.udpassociate_map[tuple(message['CLIENT'])] = UDPAssociate(client_addr,client_port, self)
-        await self.udpassociate_map[tuple(message['CLIENT'])].new_message_from_peer(message)
+    async def new_message_from_peer(self,msg):
+        if (msg.client_addr, msg.client_port) not in self.udpassociate_map:
+            self.udpassociate_map[(msg.client_addr, msg.client_port)] = UDPAssociate(msg.client_addr,
+                                                                                     msg.client_port, self)
+        await self.udpassociate_map[(msg.client_addr, msg.client_port)].new_message_from_peer(msg)
 
     async def run(self):
         while True:
             await self.send_array_semaphore.acquire()
-            message = self.send_array.pop(0)
-            await self.server.send_queue.put(pack(message))
+            await self.server.send_queue.put(self.send_array.pop(0))
 
-    async def closeAssociate(self, message):
-        if tuple(message['CLIENT']) in self.udpassociate_map:
-            await self.udpassociate_map[tuple(message['CLIENT'])].close()
-            del self.udpassociate_map[tuple(message['CLIENT'])]
+    async def closeAssociate(self, msg):
+        if (msg.client_addr, msg.client_port) in self.udpassociate_map:
+            await self.udpassociate_map[(msg.client_addr, msg.client_port)].close()
+            del self.udpassociate_map[(msg.client_addr, msg.client_port)]
 
 
 
@@ -241,36 +243,28 @@ class Server:
             except ValueError as e:
                 logging.warning("Data is Invalid (Maybe GFW changed the packet): %s" % e.args)
                 return
-            message = unpack(data)
-            if 'ID' in message:
-                ID = message['ID']
-            if "METHOD" in message:
-                if message["METHOD"] == "CONNECT":
-                    stream = Stream(ID, message["ATYP"], message["REMOTE"], message["PORT"], self)
-                    self.stream_map[stream.stream_id] = stream
-                    logging.info("new stream: %s, remote %s:%s" % (ID, message["REMOTE"], message["PORT"]))
-                    asyncio.ensure_future(stream.run())
 
-                elif message['METHOD'] == 'RCLOSE':
-                    if ID in self.stream_map:
-                        self.stream_map[ID].rclose()
-                elif message['METHOD'] == 'UDP':
-                    if message['TYPE'] == 'DATA':
-                        await self.udprelay.new_message_from_peer(message)
-                    elif message['TYPE'] == 'CLOSE':
-                        await self.udprelay.closeAssociate(message)
+            msg = decode_msg(data)
 
-
-                elif message['METHOD'] == 'CLOSETUNNEL':
-                        self.close_tunnel = True
-                        return
-
-
-            else:
-                logging.debug("new data from peer : Stream %s " % ID)
-                if ID in self.stream_map:
-                    await self.stream_map[ID].write_queue.put(message)
-                    self.stream_map[ID].new_write_queue.set()
+            if msg.msgtype == MsgType.Connect:
+                stream = Stream(msg.stream_id, msg.remote_addr_type, msg.remote_addr, msg.remote_port, self)
+                self.stream_map[msg.stream_id] = stream
+                logging.info("new stream: %s, remote_addr %s:%s" % (msg.stream_id, addr_convet(msg.remote_addr), msg.remote_port))
+                asyncio.ensure_future(stream.run())
+            elif msg.msgtype == MsgType.RClose:
+                if msg.stream_id in self.stream_map:
+                    self.stream_map[msg.stream_id].rclose()
+            elif msg.msgtype == MsgType.UDP:
+                await self.udprelay.new_message_from_peer(msg)
+            elif msg.msgtype == MsgType.UDPClose:
+                await self.udprelay.closeAssociate(msg)
+            elif msg.msgtype == MsgType.CloseTunnel:
+                self.close_tunnel = True
+            elif msg.msgtype == MsgType.Data:
+                logging.debug("new data from peer : stream %s " % msg.stream_id)
+                if msg.stream_id in self.stream_map:
+                    await self.stream_map[msg.stream_id].write_queue.put(msg)
+                    self.stream_map[msg.stream_id].write_queue_event.set()
 
 
 cipher = None

@@ -2,53 +2,53 @@
 
 import asyncio
 import websockets
-import msgpack
 import ipaddress
 import socket
 import logging
 import concurrent.futures
 import argparse
-import json
-from typing import *
 from cipher_algorithm import *
 import sys
 from datetime import *
-import os
+
 
 class Stream:
-    def __init__(self, reader, writer, atyp, remote, port, stream_id, local):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                 remote_addr_type: AddressType, remote_addr: str, remote_port: int, stream_id: int, local):
 
         self.reader = reader
         self.writer = writer
-        self.atyp = atyp
-        self.remote = remote
-        self.port = port
+        self.remote_address_type = remote_addr_type
+        self.remote_addr = remote_addr
+        self.remote_port = remote_port
         self.stream_id = stream_id
         self.local = local
 
-        self.read_task = None
-        self.write_task = None
+        self.read_task: asyncio.Task = None
+        self.write_task: asyncio.Task = None
 
         self.write_queue = asyncio.Queue()
-        self.new_write_queue = asyncio.Event()
-        self.new_write_queue.set()
+        self.write_queue_event = asyncio.Event()
+        self.write_queue_event.set()
 
         self.write_and_close = False
 
     async def run(self):
-        data = pack({"METHOD": "CONNECT", "ATYP": self.atyp,
-                     "REMOTE": self.remote, "PORT": self.port, "ID": self.stream_id})
-
-        logging.info("start new stream :%s, %s:%s" % (self.stream_id, self.remote, self.port))
-
-        await self.local.send_queue.put(data)
+        logging.info("start new stream : %s, %s:%s" % (self.stream_id, addr_convet(self.remote_addr), self.remote_port))
+        await self.local.send_queue.put(encode_msg(msgtype=MsgType.Connect,
+                                                   remote_addr_type=self.remote_address_type,
+                                                   remote_addr=self.remote_addr,
+                                                   remote_port=self.remote_port,
+                                                   stream_id=self.stream_id))
 
     def connection_established(self):
+        logging.info("new stream connected : %s, remote_addr: %s:%s" % (self.stream_id, addr_convet(self.remote_addr), self.remote_port))
         self.writer.write(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00')
         self.read_task = asyncio.ensure_future(self.read_from_client())
         self.write_task = asyncio.ensure_future(self.write_to_client())
 
     def connection_failure(self):
+        logging.info("new stream connect failed : %s, %s:%s" % (self.stream_id, addr_convet(self.remote_addr), self.remote_port))
         self.writer.write(b'\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00')
         self.writer.close()
         del self.local.stream_map[self.stream_id]
@@ -56,28 +56,33 @@ class Stream:
     async def read_from_client(self):
         while True:
             try:
-                raw_data = await self.reader.read(8196)
+                raw_data = await self.reader.read(819600)
             except ConnectionError:
-                logging.debug("send rclose message to peer : stream %s" % self.stream_id)
-                await self.local.send_queue.put(pack({"METHOD": "RCLOSE", "ID": self.stream_id}))
+                logging.info("send rclose message to peer : stream %s" % self.stream_id)
+                await self.local.send_queue.put(encode_msg(msgtype=MsgType.RClose,
+                                                           stream_id=self.stream_id))
+
                 return
             if len(raw_data) == 0:
                 if self.reader.at_eof():
-                    logging.debug("send rclose message to peer : stream %s" % self.stream_id)
-                    await self.local.send_queue.put(pack({"METHOD": "RCLOSE", "ID": self.stream_id}))
+                    logging.info("send rclose message to peer : stream %s" % self.stream_id)
+                    await self.local.send_queue.put(encode_msg(msgtype=MsgType.RClose,
+                                                               stream_id=self.stream_id))
                     return
-            logging.debug("recv some data from client: stream %s" % self.stream_id)
 
-            await self.local.send_queue.put(pack({"ID": self.stream_id, "DATA": raw_data}))
+            logging.info("receive some data from client: stream %s" % self.stream_id)
+            await self.local.send_queue.put(encode_msg(msgtype=MsgType.Data,
+                                                       stream_id=self.stream_id,
+                                                       data=raw_data))
 
     async def write_to_client(self):
         while True:
             if not self.write_and_close:
-                await self.new_write_queue.wait()
+                await self.write_queue_event.wait()
             try:
-                message = self.write_queue.get_nowait()
+                msg = self.write_queue.get_nowait()
             except asyncio.queues.QueueEmpty:
-                self.new_write_queue.clear()
+                self.write_queue_event.clear()
                 if self.write_and_close:
                     logging.info("close writer : stream %s" % self.stream_id)
                     if not self.writer.transport.is_closing():
@@ -89,7 +94,7 @@ class Stream:
                 continue
 
             logging.debug("send some data to client: stream %s" % self.stream_id)
-            self.writer.write(message["DATA"])
+            self.writer.write(msg.data)
             try:
                 await self.writer.drain()
             except concurrent.futures.CancelledError:
@@ -105,101 +110,109 @@ class Stream:
     def rclose(self):
         logging.debug("prepare to close writer : stream %s" % self.stream_id)
         self.write_and_close = True
-        self.new_write_queue.set()
+        self.write_queue_event.set()
         if self.stream_id in self.local.stream_map:
             del self.local.stream_map[self.stream_id]
 
 
 class UDPAssociate:
-    def __init__(self, reader, writer, atyp, client_addr, client_port):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                 client_addr_type: AddressType, client_addr: str, client_port: int):
         self.reader = reader
         self.writer = writer
-        self.atyp = atyp
+        self.client_addr_type = client_addr_type
         self.client_addr = client_addr
         self.client_port = client_port
-        self.new_data_come_semaphore = asyncio.Semaphore(0)
+
+        self.data_array_semaphore = asyncio.Semaphore(0)
         self.data_array = []
+
         self.run_task = asyncio.ensure_future(self.run())
         asyncio.ensure_future(self.read())
 
-    def addRelay(self, relay):
+        self.relay: UDPRelay = None
+
+    def add_relay(self, relay):
         self.relay = relay
 
     async def read(self):
         try:
-            data =  await self.reader.read()
+            data = await self.reader.read()
         except ConnectionError:
             self.run_task.cancel()
             if (self.client_addr, self.client_port) in self.relay.udpassociate_map:
-                await self.relay.send_queue.put(pack({'METHOD':'UDP','TYPE':'CLOSE',
-                                                      'CLIENT': (self.client_addr, self.client_port)}))
-                logging.info("close udp associate")
+                await self.relay.send_queue.put(encode_msg(msgtype=MsgType.UDPClose,
+                                                           client_addr=self.client_addr,
+                                                           client_port=self.client_port))
+                logging.info("close udp associate : %s:%s" % (addr_convet(self.client_addr), self.client_port))
                 del self.relay.udpassociate_map[(self.client_addr, self.client_port)]
-                return
+            return
 
         if len(data) == 0:
             self.run_task.cancel()
             if (self.client_addr, self.client_port) in self.relay.udpassociate_map:
-                await self.relay.send_queue.put(pack({'METHOD': 'UDP', 'TYPE': 'CLOSE',
-                                                      'CLIENT': (self.client_addr, self.client_port)}))
-                logging.info("close udp associate")
+                await self.relay.send_queue.put(encode_msg(msgtype=MsgType.UDPClose,
+                                                           client_addr=self.client_addr,
+                                                           client_port=self.client_port))
+                logging.info("close udp associate : %s:%s" % (addr_convet(self.client_addr), self.client_port))
                 del self.relay.udpassociate_map[(self.client_addr, self.client_port)]
-                return
-        logging.info("some problem happend")
+            return
+        logging.warning("some problem happened:  data = %s, client = %s:%s" % (data, addr_convet(self.client_addr), self.client_port))
 
     async def run(self):
         while True:
-            await self.new_data_come_semaphore.acquire()
+            await self.data_array_semaphore.acquire()
             data = self.data_array.pop(0)
             if data[3] == 0x01:
-                atyp = 'IPV4'
+                remote_addr_type = AddressType.IPv4
                 remote_addr = socket.inet_ntop(socket.AF_INET, data[4:8])
                 remote_port = int.from_bytes(data[8:10], byteorder='big', signed=False)
             elif data[3] == 0x03:
-                atyp = 'DOMAINNAME'
+                remote_addr_type = AddressType.DomainName
                 remote_addr = data[5:5+data[4]].decode()
                 remote_port = int.from_bytes(data[5+data[4]:7+data[4]], byteorder='big', signed=False)
             elif data[3] == 0x04:
-                atyp = 'IPV6'
+                remote_addr_type = AddressType.IPv6
                 remote_addr = socket.inet_ntop(socket.AF_INET, data[4:20])
                 remote_port = int.from_bytes(data[20:22], byteorder='big', signed=False)
 
-            logging.info("send udp data to remote %s:%s, %s:%s" %
-                         (remote_addr, remote_port, self.client_addr, self.client_port))
-            await self.relay.send_queue.put(pack({'METHOD': 'UDP',
-                                                  'TYPE': 'DATA',
-                                                  'CLIENT': (self.client_addr, self.client_port),
-                                                  'ATYP' : atyp,
-                                                  'REMOTE': (remote_addr, remote_port),
-                                                  'DATA': data[10:]}))
+            logging.info("send udp data to remote_addr %s:%s, %s:%s" %
+                         (remote_addr, remote_port, addr_convet(self.client_addr), self.client_port))
+
+            await self.relay.send_queue.put(encode_msg(msgtype=MsgType.UDP,
+                                                       client_addr=self.client_addr,
+                                                       client_port=self.client_port,
+                                                       remote_addr_type=remote_addr_type,
+                                                       remote_addr=remote_addr,
+                                                       remote_port=remote_port,
+                                                       data=data[10:]))
 
     def new_data_from_client(self,data):
         if data[2] != 0x00:  # FRAG always is 0x00
             return
         logging.info("append some udp data")
         self.data_array.append(data)
-        self.new_data_come_semaphore.release()
+        self.data_array_semaphore.release()
 
-    def send_data_to_client(self, data, remote_addr, remote_port, atyp):
-        logging.info("send udp data to client %s:%s  %s:%s" %(self.client_addr,self.client_port, remote_addr,remote_port))
-        if atyp == 'IPV4':
+    def send_data_to_client(self, data, remote_addr, remote_port, remote_addr_type):
+        logging.info("send udp data to client %s:%s  %s:%s" % (self.client_addr, self.client_port,
+                                                               remote_addr, remote_port))
+        if remote_addr_type == AddressType.IPv4:
             self.relay.transport.sendto(b'\x00\x00\x00\x01' +
                                     socket.inet_pton(socket.AF_INET,remote_addr) +
                                     remote_port.to_bytes(2, byteorder='big', signed=False) +
                                     data, (self.client_addr, self.client_port))
-        elif atyp == 'IPV6':
+        elif remote_addr_type == AddressType.IPv6:
             self.relay.transport.sendto(b'\x00\x00\x00\x04' +
                                     socket.inet_pton(socket.AF_INET6,remote_addr) +
                                     remote_port.to_bytes(2, byteorder='big', signed=False) +
                                     data, (self.client_addr, self.client_port))
-        elif atyp == 'DOMAINNAME':
+        elif remote_addr_type == AddressType.DomainName:
             self.relay.transport.sendto(b'\x00\x00\x00\x03' +
                                         len(remote_addr).to_bytes(1,byteorder='big', signed=False) +
                                         remote_addr.encode() +
                                         remote_port.to_bytes(2, byteorder='big', signed=False) +
                                         data, (self.client_addr, self.client_port))
-
-
 
 
 class UDPRelay:
@@ -214,63 +227,56 @@ class UDPRelay:
         self.transport = transport
 
     def datagram_received(self,data, addr):  #(ip:client_port)
-        logging.info("datagram_received from %s:%s"% addr)
-        if addr in self.udpassociate_map:
-            self.udpassociate_map[addr].new_data_from_client(data)
-            logging.info("Here")
-
+        remote_addr = addr[0]
+        remote_port = addr[1]
+        logging.info("datagram_received from %s:%s" % (addr_convet(remote_addr),remote_port))
+        if (remote_addr,remote_port) in self.udpassociate_map:
+            self.udpassociate_map[(remote_addr,remote_port)].new_data_from_client(data)
         else:
-            ip, port = addr
             for client_addr , client_port in self.udpassociate_map:
-                if client_port == 0 and client_addr == '0.0.0.0':
-                    udp = self.udpassociate_map[('0.0.0.0',0)]
-                    udp.client_addr = ip
-                    udp.client_port = port
-                    self.udpassociate_map[addr] = udp
+                if client_port == remote_port and (client_addr == '0.0.0.0' or client_addr == '::'):
+                    udp = self.udpassociate_map[(client_addr, remote_port)]
+                    udp.client_addr = remote_addr
+                    self.udpassociate_map[(remote_addr,remote_port)] = udp
                     udp.new_data_from_client(data)
-                    logging.info("udp data from %s:%s" %addr)
-                    logging.info("There")
-                    break
-
-                if client_port == port and client_addr == '0.0.0.0':
-                    udp = self.udpassociate_map[('0.0.0.0',port)]
-                    udp.client_addr = ip
-                    self.udpassociate_map[addr] = udp
+                    return
+            for client_addr, client_port in self.udpassociate_map:
+                if client_port == 0 and (client_addr == '0.0.0.0' or client_addr == '::'):
+                    udp = self.udpassociate_map[(client_addr,0)]
+                    udp.client_addr = remote_addr
+                    udp.client_port = remote_port
+                    self.udpassociate_map[(remote_addr,remote_port)] = udp
                     udp.new_data_from_client(data)
-                    logging.info("udp data from %s:%s" %addr)
-                    logging.info("There")
-                    break
-
-
-
+                    return
 
     def error_received(self, exc):
         pass
 
     def addUDPAssociate(self, udpassocaite : UDPAssociate):
-        # Only for IPv4
-        self.listenAddr = '127.0.0.1'
+        if self.listenAddr == '0.0.0.0' or self.listenAddr == '::':
+            sockname =  udpassocaite.writer.get_extra_info('sockname')
+            bindAddress = sockname[0]
+        else:
+            bindAddress = self.listenAddr
         try:
-            ipaddr = ipaddress.ip_address(self.listenAddr)
+            ipaddr = ipaddress.ip_address(bindAddress)
             if isinstance(ipaddr,ipaddress.IPv4Address):
-                addressbyte = b'\x01' + socket.inet_pton(socket.AF_INET,self.listenAddr)
+                addressbyte = b'\x01' + socket.inet_pton(socket.AF_INET,bindAddress)
             elif isinstance(ipaddr,ipaddress.IPv6Address):
-                addressbyte = b'\x04' + socket.inet_pton(socket.AF_INET6,self.listenAddr)
+                addressbyte = b'\x04' + socket.inet_pton(socket.AF_INET6,bindAddress)
         except ValueError:
             raise SystemExit(1)
-        logging.info(addressbyte)
         udpassocaite.writer.write(b'\x05\x00\x00' + addressbyte +
                                  self.listenPort.to_bytes(2, byteorder='big', signed=False))
-        udpassocaite.addRelay(self)
+        udpassocaite.add_relay(self)
 
         self.udpassociate_map[(udpassocaite.client_addr, udpassocaite.client_port)] = udpassocaite
         logging.info("create new udp associate %s:%s" % (udpassocaite.client_addr, udpassocaite.client_port))
 
-    def new_data_from_peer(self, message):
-        if tuple(message['CLIENT']) in self.udpassociate_map:
-            remote_addr, remote_port = tuple(message['REMOTE'])
-            self.udpassociate_map[tuple(message['CLIENT'])].send_data_to_client(
-                message['DATA'],remote_addr,remote_port, message['ATYP'])
+    def new_data_from_peer(self, msg):
+        if (msg.client_addr, msg.client_port) in self.udpassociate_map:
+            self.udpassociate_map[(msg.client_addr,msg.client_port)].send_data_to_client(
+                msg.data ,msg.remote_addr,msg.remote_port, msg.remote_addr_type)
 
 
 
@@ -308,30 +314,33 @@ class Local:
             except ValueError as e:
                 logging.warning("Data is Invalid (Maybe GFW changed the packet): %s" % e.args)
                 return
-            message = unpack(data)
-            if 'ID' in message:
-                ID = message['ID']
-            if 'METHOD' in message:
-                if message['METHOD'] == 'RCLOSE':
-                    if ID in self.stream_map:
-                        self.stream_map[ID].rclose()
-                elif message['METHOD'] == "CONNECTIONOK":
-                    if ID in self.stream_map:
-                        self.stream_map[ID].connection_established()
-                elif message['METHOD'] == "CONNECTIONFAILURE":
-                    if ID in self.stream_map:
-                        self.stream_map[ID].connection_failure()
-                elif message['METHOD'] == "UDP":
-                    if message['TYPE'] == 'DATA':
-                        self.udprelay.new_data_from_peer(message)
-            else:
-                logging.debug("recv data from peer : stream %s" % ID)
-                if ID in self.stream_map:
-                    await self.stream_map[ID].write_queue.put(message)
-                    self.stream_map[ID].new_write_queue.set()
+            msg = decode_msg(data)
+            if msg.msgtype == MsgType.RClose:
+                if msg.stream_id in self.stream_map:
+                    self.stream_map[msg.stream_id].rclose()
+            elif msg.msgtype == MsgType.Connection_OK:
+                if msg.stream_id in self.stream_map:
+                    self.stream_map[msg.stream_id].connection_established()
+            elif msg.msgtype == MsgType.Connection_Failure:
+                if msg.stream_id in self.stream_map:
+                    self.stream_map[msg.stream_id].connection_failure()
+            elif msg.msgtype == MsgType.UDP:
+                self.udprelay.new_data_from_peer(msg)
+            elif msg.msgtype == MsgType.Data:
+                if msg.stream_id in self.stream_map:
+                    await self.stream_map[msg.stream_id].write_queue.put(msg)
+                    self.stream_map[msg.stream_id].write_queue_event.set()
 
-    async def connect_to_peer(self, serverAddress, serverPort, listenAddress, listenPort, reconnect = False):
-        self.uri = "ws://%s:%d" % (serverAddress, serverPort)
+    async def connect_to_peer(self, serverAddress, serverPort, listenAddress, listenPort, reconnect=False):
+        try:
+            ip = ipaddress.ip_address(serverAddress)
+            if isinstance(ip,ipaddress.IPv4Address):
+                self.uri = "ws://%s:%s" % (serverAddress, serverPort)
+            else:
+                self.uri = "ws://[%s]:%s" % (serverAddress, serverPort)
+        except:
+            self.uri = "ws://%s:%s" % (serverAddress, serverPort)
+
         self.listenAddres = listenAddress
         self.listenPort = listenPort
         try:
@@ -362,7 +371,7 @@ class Local:
             delta = datetime.now() - self.last_active_time
             if delta.total_seconds() > 3600:
                 self.close_tunnel = True
-                await self.send_queue.put(pack({'METHOD':"CLOSETUNNEL"}))
+                await self.send_queue.put(encode_msg(msgtype=MsgType.CloseTunnel))
                 return
 
     async def new_tcp_income(self, reader, writer):
@@ -407,7 +416,7 @@ class Local:
                     return
 
                 client_addr = socket.inet_ntop(socket.AF_INET, data)
-                atyp = "IPV4"
+                remote_addr_type = AddressType.IPv4
             elif data[3] == 0x04:
                 try:
                     data = await reader.readexactly(16)
@@ -417,9 +426,9 @@ class Local:
                     return
 
                 client_addr= socket.inet_ntop(socket.AF_INET6, data)
-                atyp = "IPV6"
+                remote_addr_type = AddressType.IPv6
             else:
-                print("Unsupported address type", file=sys.stderr)
+                print("Unsupported address msgtype", file=sys.stderr)
                 writer.close()
                 return
             try:
@@ -429,8 +438,8 @@ class Local:
                 writer.close()
                 return
 
-            port = int.from_bytes(data, byteorder='big', signed=False)
-            udpassociate = UDPAssociate(reader,writer,atyp,client_addr,port)
+            remote_port = int.from_bytes(data, byteorder='big', signed=False)
+            udpassociate = UDPAssociate(reader,writer,remote_addr_type,client_addr,remote_port)
             self.udprelay.addUDPAssociate(udpassociate)
 
         else:
@@ -442,8 +451,8 @@ class Local:
                     writer.close()
                     return
 
-                remote = socket.inet_ntop(socket.AF_INET, data)
-                atyp = "IPV4"
+                remoter_addr = socket.inet_ntop(socket.AF_INET, data)
+                remote_addr_type = AddressType.IPv4
             elif data[3] == 0x03:
                 try:
                     data = await reader.readexactly(1)
@@ -458,8 +467,8 @@ class Local:
                     writer.close()
                     return
 
-                remote = data.decode()
-                atyp = "DOMAINNAME"
+                remoter_addr = data.decode()
+                remote_addr_type = AddressType.DomainName
             elif data[3] == 0x04:
                 try:
                     data = await reader.readexactly(16)
@@ -468,10 +477,10 @@ class Local:
                     writer.close()
                     return
 
-                remote = socket.inet_ntop(socket.AF_INET6, data)
-                atyp = "IPV6"
+                remoter_addr = socket.inet_ntop(socket.AF_INET6, data)
+                remote_addr_type = AddressType.IPv6
             else:
-                print("Unsupported address type")
+                print("Unsupported address msgtype")
                 writer.close()
                 return
             try:
@@ -480,10 +489,10 @@ class Local:
                 print(e.args)
                 writer.close()
                 return
-            port = int.from_bytes(data, byteorder='big', signed=False)
+            remote_port = int.from_bytes(data, byteorder='big', signed=False)
 
             fd = writer.get_extra_info('socket').fileno()
-            stream = Stream(reader, writer, atyp, remote, port, fd, self)
+            stream = Stream(reader, writer, remote_addr_type, remoter_addr, remote_port, fd, self)
             self.stream_map[fd] = stream
             asyncio.ensure_future(stream.run())
 
