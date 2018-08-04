@@ -1,5 +1,5 @@
 # wsproxy
-Socks5 Proxy over WebSocket
+Socks5 Proxy over WebSocket(TLS)
 
 
 TCP proxy and UDP proxy are both supported
@@ -44,14 +44,21 @@ require Python module : websockets , msgpack-python , pycryptodome
 
 
 confile file formation
-    
+
+        
     {
         "mode" : "aes-128-gcm",
         "key" : "jnfdnfvdnvdsvdv33r932mj9&023",
-        "serverAddress" : "127.0.0.1",
+        "serverAddress" : "0.0.0.0",
         "serverPort" : 8765,
         "localAddress": "0.0.0.0",
-        "localPort" : 8766
+        "localPort" : 8766,
+        "dnsrelay": true,
+        "normal_dns": "8.8.8.8"
+        "ssl_server_pem": "server.pem",
+	    "ssl_server_key": "server.key",
+	    "ssl_client_ca":  "ca.pem"
+    
     }
 
 

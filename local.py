@@ -10,6 +10,8 @@ import argparse
 from misc import *
 import sys
 from datetime import *
+import ssl
+import pathlib
 
 
 
@@ -283,20 +285,18 @@ class DNSRelay:
     def __init__(self, local):
         self.transaction_map: dict[bytes, (str, int)] = {}
         self.local = local
-        self.data_array_semaphore = asyncio.Semaphore(0)
-        self.data_array = []
+        self.data_array = asyncio.Queue()
 
     def connection_made(self, transport):
         self.transport = transport
 
-    def datagram_received(self,data, addr):  #(ip:client_port)
+    def datagram_received(self,data, addr):
         remote_addr = addr[0]
         remote_port = addr[1]
         logging.info("DNS request from %s:%s" % (addr_convert(remote_addr), remote_port))
         self.transaction_map[data[:2]] = (remote_addr, remote_port)
         asyncio.ensure_future(self.delete_transaction(data[:2]))
-        self.data_array.append(data)
-        self.data_array_semaphore.release()
+        self.data_array.put_nowait(data)
 
     async def delete_transaction(self, tid):
         await asyncio.sleep(60)
@@ -307,10 +307,10 @@ class DNSRelay:
 
     async def run(self):
         while True:
-            await self.data_array_semaphore.acquire()
+            data = await self.data_array.get()
             logging.info('send DNS request')
             await self.local.send_queue.put(encode_msg(msgtype=MsgType.DNSRequest,
-                                             data=self.data_array.pop(0)), emergy=True)
+                                                       data=data), emergy=True)
 
     def replay_from_peer(self, msg):
         try:
@@ -377,14 +377,24 @@ class Local:
             elif msg.msgtype == MsgType.DNSReplay:
                 self.dnsrelay.replay_from_peer(msg)
 
-    async def connect_to_peer(self, serverAddress, serverPort,
-                              listenAddress, listenPort, dnsrelay: bool, reconnect=False):
+    async def connect_to_peer(self, server_addr, server_port,
+                              listen_addr, listen_port, do_dnsrelay: bool, reconnect=False,ssl_client_crt=None):
+        if ssl_client_crt:
+            self.uri = "wss://%s:%s" % (addr_convert(server_addr), server_port)
+            ssl_context = ssl.SSLContext()
+            ssl_context.load_verify_locations(ssl_client_crt)
+        else:
+            self.uri = "ws://%s:%s" % (addr_convert(server_addr), server_port)
+        self.listen_addr = listen_addr
+        self.listen_port = listen_port
 
-        self.uri = "ws://%s:%s" % (addr_convert(serverAddress), serverPort)
-        self.listenAddres = listenAddress
-        self.listenPort = listenPort
+
+
         try:
-            self.ws = await websockets.connect(self.uri)
+            if ssl_client_crt:
+                self.ws = await websockets.connect(self.uri,ssl=ssl_context)
+            else:
+                self.ws = await websockets.connect(self.uri)
         except OSError as e:
             print(e.args)
             raise SystemExit(1)
@@ -392,16 +402,16 @@ class Local:
         print("websockets connection established !")
 
         if not reconnect:
-            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, "0.0.0.0", listenPort))
+            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, "0.0.0.0", listen_port))
             transport, self.udprelay = await \
                 asyncio.get_event_loop().create_datagram_endpoint(
-                    lambda: UDPRelay(self,self.listenAddres,self.listenPort),
-                       local_addr=(listenAddress, listenPort))
-            if dnsrelay:
+                    lambda: UDPRelay(self, self.listen_addr, self.listen_port),
+                       local_addr=(listen_addr, listen_port))
+            if do_dnsrelay:
                 transport, self.dnsrelay = await  \
                     asyncio.get_event_loop().create_datagram_endpoint(
                         lambda: DNSRelay(self),
-                        local_addr=(listenAddress,53))
+                        local_addr=(listen_addr, 53))
 
                 asyncio.ensure_future(self.dnsrelay.run())
 
@@ -411,7 +421,7 @@ class Local:
 
 
     async def reconnect(self):
-        await self.connect_to_peer(self.uri, self.listenAddres, self.listenPort, True)
+        await self.connect_to_peer(self.uri, self.listen_addr, self.listen_port, True)
 
     async def check_connection(self):
         while True:
@@ -569,10 +579,17 @@ def main():
     else:
         print("Unsupported mode",file=sys.stderr)
 
+    try:
+        ssl_client_ca = config['ssl_client_ca']
+    except KeyError:
+        ssl_client_ca = None
+
+
+
     local = Local(cipher)
     asyncio.ensure_future(local.connect_to_peer(config['serverAddress'], config["serverPort"],
                                                 config['localAddress'], config["localPort"],
-                                                config.pop('dnsrelay',False)))
+                                                config.pop('dnsrelay',False),ssl_client_ca))
     loop.run_forever()
 
 

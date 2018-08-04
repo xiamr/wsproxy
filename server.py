@@ -10,6 +10,8 @@ import argparse
 from misc import *
 import copy
 import sys
+import ssl
+import pathlib
 
 
 
@@ -207,22 +209,20 @@ class UDPRelay:
 class DNSRelay:
     def __init__(self, server):
         self.server = server
-        self.send_array = []
-        self.send_array_semaphore = asyncio.Semaphore(0)
+        self.send_array = asyncio.Queue()
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self,data, addr):
         logging.info("recv dns replay ")
-        self.send_array.append(data)
-        self.send_array_semaphore.release()
+        self.send_array.put_nowait(data)
 
     async def run(self):
         while True:
-            await self.send_array_semaphore.acquire()
+            data = await self.send_array.get()
             await self.server.send_queue.put(encode_msg(msgtype=MsgType.DNSReplay,
-                                                        data=self.send_array.pop(0)),emergy=True)
+                                                        data=data),emergy=True)
 
     def new_request_from_peer(self,msg):
         logging.info('new dns request')
@@ -284,28 +284,32 @@ class Server:
                 return
 
             msg = decode_msg(data)
+            try:
 
-            if msg.msgtype == MsgType.Connect:
-                stream = Stream(msg.stream_id, msg.remote_addr_type, msg.remote_addr, msg.remote_port, self)
-                self.stream_map[msg.stream_id] = stream
-                logging.info("new stream: %s, remote_addr %s:%s" % (msg.stream_id, addr_convert(msg.remote_addr), msg.remote_port))
-                asyncio.ensure_future(stream.run())
-            elif msg.msgtype == MsgType.RClose:
-                if msg.stream_id in self.stream_map:
-                    self.stream_map[msg.stream_id].rclose()
-            elif msg.msgtype == MsgType.UDP:
-                await self.udprelay.new_message_from_peer(msg)
-            elif msg.msgtype == MsgType.UDPClose:
-                await self.udprelay.closeAssociate(msg)
-            elif msg.msgtype == MsgType.CloseTunnel:
-                self.close_tunnel = True
-            elif msg.msgtype == MsgType.Data:
-                logging.debug("new data from peer : stream %s " % msg.stream_id)
-                if msg.stream_id in self.stream_map:
-                    await self.stream_map[msg.stream_id].write_queue.put(msg)
-                    self.stream_map[msg.stream_id].write_queue_event.set()
-            elif msg.msgtype == MsgType.DNSRequest:
-                self.dnsrelay.new_request_from_peer(msg)
+                if msg.msgtype == MsgType.Connect:
+                    stream = Stream(msg.stream_id, msg.remote_addr_type, msg.remote_addr, msg.remote_port, self)
+                    self.stream_map[msg.stream_id] = stream
+                    logging.info("new stream: %s, remote_addr %s:%s" % (msg.stream_id, addr_convert(msg.remote_addr), msg.remote_port))
+                    asyncio.ensure_future(stream.run())
+                elif msg.msgtype == MsgType.RClose:
+                    if msg.stream_id in self.stream_map:
+                        self.stream_map[msg.stream_id].rclose()
+                elif msg.msgtype == MsgType.UDP:
+                    await self.udprelay.new_message_from_peer(msg)
+                elif msg.msgtype == MsgType.UDPClose:
+                    await self.udprelay.closeAssociate(msg)
+                elif msg.msgtype == MsgType.CloseTunnel:
+                    self.close_tunnel = True
+                elif msg.msgtype == MsgType.Data:
+                    logging.debug("new data from peer : stream %s " % msg.stream_id)
+                    if msg.stream_id in self.stream_map:
+                        await self.stream_map[msg.stream_id].write_queue.put(msg)
+                        self.stream_map[msg.stream_id].write_queue_event.set()
+                elif msg.msgtype == MsgType.DNSRequest:
+                    self.dnsrelay.new_request_from_peer(msg)
+            except KeyError:
+                pass
+
 
 
 cipher = None
@@ -338,6 +342,8 @@ def main():
     with open(args.config) as f:
         config = json.load(f)
 
+    enable_ssl = False
+
     if config['mode'] == "replace":
         cipher = Replace()
         cipher.load_key(config['key'])
@@ -346,11 +352,25 @@ def main():
         cipher.load_key(config['key'])
     else:
         print("Unsupported mode",file=sys.stderr)
+    try:
+        ssl_context = ssl.SSLContext()
+        ssl_context.load_cert_chain(config['ssl_server_pem'], keyfile=config['ssl_server_key'])
+        enable_ssl = True
+    except KeyError:
+        pass
 
     normal_dns = config.pop('normal_dns','8.8.8.8')
 
+    ssl_context = ssl.SSLContext()
+    ssl_context.load_cert_chain('localhost.pem',keyfile="server.key")
+
     loop = asyncio.get_event_loop()
-    asyncio.ensure_future(websockets.serve(new_ws_connection, config["serverAddress"], config["serverPort"]))
+    if enable_ssl:
+        asyncio.ensure_future(websockets.serve(new_ws_connection,
+                                           config["serverAddress"], config["serverPort"],ssl=ssl_context))
+    else:
+        asyncio.ensure_future(websockets.serve(new_ws_connection,
+                                               config["serverAddress"], config["serverPort"]))
 
     loop.run_forever()
 

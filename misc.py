@@ -219,9 +219,6 @@ def encode_msg(**kwargs):
 
 
 class Replace:
-    def __init__(self):
-        pass
-
     def encrypt(self, data):
         data_array = bytearray(data)
         for i in range(len(data)):
@@ -249,9 +246,6 @@ class Replace:
 
 
 class AES_128_GCM:
-    def __init__(self):
-        pass
-
     def encrypt(self, plaindata):
         cipher = AES.new(self.key, AES.MODE_GCM)
         cipherdata, tag = cipher.encrypt_and_digest(plaindata)
