@@ -281,11 +281,10 @@ class Server:
                 data = self.cipher.decrypt(data)
             except ValueError as e:
                 logging.warning("Data is Invalid (Maybe GFW changed the packet): %s" % e.args)
-                return
+                continue
 
             msg = decode_msg(data)
             try:
-
                 if msg.msgtype == MsgType.Connect:
                     stream = Stream(msg.stream_id, msg.remote_addr_type, msg.remote_addr, msg.remote_port, self)
                     self.stream_map[msg.stream_id] = stream
@@ -314,9 +313,13 @@ class Server:
 
 cipher = None
 normal_dns = None
+loc = None
 
 
-async def new_ws_connection(ws, path):
+async def new_ws_connection(ws, path: str):
+    if path != '/%s'%loc:
+        logging.warning("wrong path %s compare to %s", path,loc)
+        return
     server = Server(ws, cipher,normal_dns)
     try:
         await server.run()
@@ -324,10 +327,8 @@ async def new_ws_connection(ws, path):
         logging.info("Close Tunnel : %s" % e.args)
 
 
-
-
 def main():
-    global cipher, normal_dns
+    global cipher, normal_dns,loc
 
     parser = argparse.ArgumentParser(description="Server part for crossing the GFW")
     parser.add_argument('-c', '--config', help="config file", default='config.json')
@@ -350,6 +351,8 @@ def main():
     elif config['mode'] == 'aes-128-gcm':
         cipher = AES_128_GCM()
         cipher.load_key(config['key'])
+    elif config['mode'] == "none":
+        cipher = NoEncrypt()
     else:
         print("Unsupported mode",file=sys.stderr)
     try:
@@ -357,20 +360,25 @@ def main():
         ssl_context.load_cert_chain(config['ssl_server_pem'], keyfile=config['ssl_server_key'])
         enable_ssl = True
     except KeyError:
-        pass
+        ssl_context = None
+    global enable_compress
+
+    enable_compress = config.pop('compress',True)
+    loc = config.pop('loc',None)
 
     normal_dns = config.pop('normal_dns','8.8.8.8')
 
-    ssl_context = ssl.SSLContext()
-    ssl_context.load_cert_chain('localhost.pem',keyfile="server.key")
 
     loop = asyncio.get_event_loop()
-    if enable_ssl:
-        asyncio.ensure_future(websockets.serve(new_ws_connection,
-                                           config["serverAddress"], config["serverPort"],ssl=ssl_context))
+
+
+    if "unix_socket_path" in config:
+        asyncio.ensure_future(websockets.unix_serve(new_ws_connection,config['unix_socket_path']))
     else:
         asyncio.ensure_future(websockets.serve(new_ws_connection,
-                                               config["serverAddress"], config["serverPort"]))
+                                           config["serverAddress"], config["serverPort"],ssl=ssl_context))
+
+
 
     loop.run_forever()
 

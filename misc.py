@@ -14,6 +14,8 @@ import pickle
 import ipaddress
 import asyncio
 
+enable_compress: bool = True
+
 
 class TwoPrioQueue:
     def __init__(self,maxsize = 0):
@@ -107,13 +109,13 @@ def decode_enum(obj):
 
 
 def pack(plaintext):
-    #return pickle.dumps(plaintext)
-    return bz2.compress(msgpack.packb(plaintext, use_bin_type=True, default=encode_enum))
+    data = msgpack.packb(plaintext, use_bin_type=True, default=encode_enum)
+    return bz2.compress(data) if enable_compress else data
 
 
 def unpack(data):
-    #return pickle.loads(data)
-    return msgpack.unpackb(bz2.decompress(data), encoding='utf-8', object_hook=decode_enum)
+    data = bz2.decompress(data) if enable_compress else data
+    return msgpack.unpackb(data, encoding='utf-8', object_hook=decode_enum)
 
 
 @msgpack_enum_register
@@ -217,6 +219,16 @@ def encode_msg(**kwargs):
 
     return pack(message)
 
+
+class NoEncrypt:
+    def encrypt(self,data):
+        return data
+
+    def decrypt(self,data):
+        return data
+
+    def load_key(self,passphrase):
+        pass
 
 class Replace:
     def encrypt(self, data):

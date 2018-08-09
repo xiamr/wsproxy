@@ -60,7 +60,7 @@ class Stream:
         while True:
             try:
                 raw_data = await self.reader.read(8196)
-            except ConnectionError:
+            except (ConnectionError,ConnectionAbortedError):
                 logging.info("send rclose message to peer : stream %s" % self.stream_id)
                 await self.local.send_queue.put(encode_msg(msgtype=MsgType.RClose,
                                                            stream_id=self.stream_id))
@@ -88,7 +88,12 @@ class Stream:
                 if self.write_and_close:
                     logging.info("close writer : stream %s" % self.stream_id)
                     if not self.writer.transport.is_closing():
-                        self.writer.write_eof()
+                        try:
+                            self.writer.write_eof()
+                        except NotImplementedError:
+                            pass
+                        finally:
+                            self.writer.close()
                     if self.stream_id in self.local.stream_map:
                         del self.local.stream_map[self.stream_id]
 
@@ -385,59 +390,60 @@ class Local:
             except KeyError:
                 logging.warning("KeyError of msg.stream_id = %s" % msg.stream_id)
 
-    async def connect_to_peer(self, server_addr, server_port,
-                              listen_addr, listen_port, do_dnsrelay: bool,
-                              reconnect=False,enable_ssl=False,ssl_client_ca=None,loc=""):
-        if not reconnect:
-            self.enable_ssl = enable_ssl
-            self.ssl_client_ca = ssl_client_ca
-            self.loc = loc
-            self.server_addr = server_addr
-            self.server_port = server_port
-            self.listen_addr = listen_addr
-            self.listen_port = listen_port
-            self.do_dnsrelay = do_dnsrelay
-                
+    def push_param(self, server_addr, server_port,listen_addr, listen_port, do_dnsrelay: bool,
+        enable_ssl=False,ssl_client_ca=None,loc=""):
+        self.enable_ssl = enable_ssl
+        self.ssl_client_ca = ssl_client_ca
+        self.loc = loc
+        self.server_addr = server_addr
+        self.server_port = server_port
+        self.listen_addr = listen_addr
+        self.listen_port = listen_port
+        self.do_dnsrelay = do_dnsrelay
         if self.enable_ssl:
-            self.uri = "wss://%s:%s/%s" % (addr_convert(server_addr), server_port,self.loc)
-            ssl_context = ssl.SSLContext()
+            self.uri = "wss://%s:%s/%s" % (addr_convert(self.server_addr), self.server_port,self.loc)
+            self.ssl_context = ssl.SSLContext()
             if self.ssl_client_ca:
-                ssl_context.load_verify_locations(self.ssl_client_ca)
+                self.ssl_context.load_verify_locations(self.ssl_client_ca)
         else:
-            self.uri = "ws://%s:%s/%s" % (addr_convert(server_addr), server_port,self.loc)
+            self.uri = "ws://%s:%s/%s" % (addr_convert(self.server_addr), self.server_port,self.loc)
+            self.ssl_context = None
+
+
+    async def connect_to_peer(self,reconnect=False):
 
         try:
-            if self.enable_ssl:
-                self.ws = await websockets.connect(self.uri,ssl=ssl_context)
-            else:
-                self.ws = await websockets.connect(self.uri)
+            self.ws = await websockets.connect(self.uri,ssl=self.ssl_context)
         except OSError as e:
+            print(e.args)
+            return
+        except websockets.exceptions.InvalidState as e:
             print(e.args)
             return
             
         print("websockets connection established !")
 
         if not reconnect:
-            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, "0.0.0.0", listen_port))
+            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, "0.0.0.0", self.listen_port))
             transport, self.udprelay = await \
                 asyncio.get_event_loop().create_datagram_endpoint(
                     lambda: UDPRelay(self, self.listen_addr, self.listen_port),
-                       local_addr=(listen_addr, listen_port))
-            if do_dnsrelay:
+                       local_addr=(self.listen_addr, self.listen_port))
+            if self.do_dnsrelay:
                 transport, self.dnsrelay = await  \
                     asyncio.get_event_loop().create_datagram_endpoint(
                         lambda: DNSRelay(self),
-                        local_addr=(listen_addr, 53))
+                        local_addr=(self.listen_addr, 53))
 
                 asyncio.ensure_future(self.dnsrelay.run())
 
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
-        asyncio.ensure_future(self.check_connection())
+      #  asyncio.ensure_future(self.check_connection())
 
 
     async def reconnect(self):
-        await self.connect_to_peer(self.server_addr,self.server_port,self.listen_addr,self.listen_port,self.do_dnsrelay,True)
+        await self.connect_to_peer(reconnect=True)
 
     async def check_connection(self):
         while True:
@@ -449,11 +455,9 @@ class Local:
                 return
 
     async def new_tcp_income(self, reader, writer):
-        if self.close_tunnel:
-        
+        if self.close_tunnel:       
                 await self.reconnect()
                 self.close_tunnel = False
-
 
         self.last_active_time = datetime.now()
         try:
@@ -594,32 +598,27 @@ def main():
     elif config['mode'] == 'aes-128-gcm':
         cipher = AES_128_GCM()
         cipher.load_key(config['key'])
+    elif config['mode'] == "none":
+        cipher = NoEncrypt()
     else:
         print("Unsupported mode",file=sys.stderr)
 
-    try:
-        enable_ssl = config['enable_ssl']
-    except KeyError:
-        enable_ssl = False
 
-    try:
-        ssl_client_ca = config['ssl_client_ca']
-    except KeyError:
-        ssl_client_ca = None
+    enable_ssl = config.pop('enable_ssl',False)
+    ssl_client_ca = config.pop('ssl_client_ca',None)
 
-    loc = ""
-    try:
-        loc = config['loc']
-    except KeyError:
-        pass
+    loc = config.pop('loc','')
 
-
+    global enable_compress
+    enable_compress = config.pop('compress',True)
 
     local = Local(cipher)
-    asyncio.ensure_future(local.connect_to_peer(config['serverAddress'], config["serverPort"],
+    local.push_param(config['serverAddress'], config["serverPort"],
                                                 config['localAddress'], config["localPort"],
                                                 config.pop('dnsrelay',False),enable_ssl=enable_ssl,
-                                                ssl_client_ca=ssl_client_ca,loc=loc))
+                                                ssl_client_ca=ssl_client_ca,loc=loc)
+
+    asyncio.ensure_future(local.connect_to_peer(reconnect=False))
     loop.run_forever()
 
 
