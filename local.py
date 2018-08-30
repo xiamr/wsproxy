@@ -403,6 +403,9 @@ class Local:
         if self.enable_ssl:
             self.uri = "wss://%s:%s/%s" % (addr_convert(self.server_addr), self.server_port,self.loc)
             self.ssl_context = ssl.SSLContext()
+            self.ssl_context.verify_mode = ssl.CERT_REQUIRED
+            self.ssl_context.check_hostname = True
+            self.ssl_context.load_default_certs()
             if self.ssl_client_ca:
                 self.ssl_context.load_verify_locations(self.ssl_client_ca)
         else:

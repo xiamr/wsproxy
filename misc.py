@@ -13,6 +13,9 @@ import traceback
 import pickle
 import ipaddress
 import asyncio
+import random
+
+padding_content = bytearray(1024)
 
 enable_compress: bool = True
 
@@ -191,6 +194,7 @@ def encode_msg(**kwargs):
         message['REMOTEADDR'] = kwargs['remote_addr']
         message['REMOTEPORT'] = kwargs['remote_port']
         message['STREAMID'] = kwargs['stream_id']
+        message['PADDING'] = padding_content[:random.randint(0, 1024)]
     elif msgtype == MsgType.RClose:
         message['STREAMID'] = kwargs['stream_id']
     elif msgtype == MsgType.Connection_OK:
