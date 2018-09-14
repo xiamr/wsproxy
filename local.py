@@ -90,7 +90,7 @@ class Stream:
                     if not self.writer.transport.is_closing():
                         try:
                             self.writer.write_eof()
-                        except NotImplementedError:
+                        except (NotImplementedError, OSError):
                             pass
                         finally:
                             self.writer.close()
@@ -340,6 +340,8 @@ class Local:
 
         self.dnsrelay: DNSRelay = None
 
+        self.lock = asyncio.Lock()
+
     async def send_to_peer(self):
         while True:
             try:
@@ -412,6 +414,16 @@ class Local:
             self.uri = "ws://%s:%s/%s" % (addr_convert(self.server_addr), self.server_port,self.loc)
             self.ssl_context = None
 
+    async def keep_alive(self):
+        while True:
+            await asyncio.sleep(self.keep_alive_interval)
+            try:
+                logging.info("send ping ...")
+                pong_waiter = await self.ws.ping()
+                await pong_waiter
+                logging.info("recvd pong ...")
+            except websockets.exceptions.ConnectionClosed:
+                return
 
     async def connect_to_peer(self,reconnect=False):
 
@@ -427,7 +439,7 @@ class Local:
         print("websockets connection established !")
 
         if not reconnect:
-            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, "0.0.0.0", self.listen_port))
+            asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, self.listen_addr, self.listen_port))
             transport, self.udprelay = await \
                 asyncio.get_event_loop().create_datagram_endpoint(
                     lambda: UDPRelay(self, self.listen_addr, self.listen_port),
@@ -442,7 +454,8 @@ class Local:
 
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
-      #  asyncio.ensure_future(self.check_connection())
+        asyncio.ensure_future(self.keep_alive())
+        asyncio.ensure_future(self.check_connection())
 
 
     async def reconnect(self):
@@ -450,17 +463,21 @@ class Local:
 
     async def check_connection(self):
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(self.keep_alive_interval)
             delta = datetime.now() - self.last_active_time
-            if delta.total_seconds() > 3600:
+            logging.info("Idle seconds %s:",int(delta.total_seconds()))
+            if delta.total_seconds() > self.keep_alive_timeout:
                 self.close_tunnel = True
                 await self.send_queue.put(encode_msg(msgtype=MsgType.CloseTunnel))
+                await self.ws.close()
                 return
 
     async def new_tcp_income(self, reader, writer):
         if self.close_tunnel:       
-                await self.reconnect()
-                self.close_tunnel = False
+                with (await self.lock):
+                    if self.close_tunnel:
+                        await self.reconnect()
+                        self.close_tunnel = False
 
         self.last_active_time = datetime.now()
         try:
@@ -616,6 +633,10 @@ def main():
     enable_compress = config.pop('compress',True)
 
     local = Local(cipher)
+
+    local.keep_alive_interval = config.pop('keep_alive_interval',10)
+    local.keep_alive_timeout = config.pop('keep_alive_timeout',600)
+
     local.push_param(config['serverAddress'], config["serverPort"],
                                                 config['localAddress'], config["localPort"],
                                                 config.pop('dnsrelay',False),enable_ssl=enable_ssl,
