@@ -47,18 +47,19 @@ confile file formation
 
         
     {
-        "mode" : "aes-128-gcm",
-        "key" : "jnfdnfvdnvdsvdv33r932mj9&023",
-        "serverAddress" : "0.0.0.0",
-        "serverPort" : 8765,
+        "mode" : "none",
+        "unix_socket_path": "/var/run/wsproxy.socket",
+        "serverAddress" : "www.xiamr.tk",
+        "serverPort" : 443,
         "localAddress": "0.0.0.0",
         "localPort" : 8766,
-        "dnsrelay": true,
-        "normal_dns": "8.8.8.8"
-        "ssl_server_pem": "server.pem",
-	    "ssl_server_key": "server.key",
-	    "ssl_client_ca":  "ca.pem"
-    
+        "dnsrelay": false,
+        "normal_dns": "8.8.8.8",
+        "enable_ssl": true,
+        "keep_alive_interval": 10,
+        "keep_alive_timeout" : 600,
+        "loc": "c3e1b8efe92e67862bd4ca1b2bae8326f582f361",
+        "compress": false
     }
 
 
