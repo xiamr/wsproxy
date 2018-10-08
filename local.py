@@ -341,6 +341,8 @@ class Local:
         self.dnsrelay: DNSRelay = None
 
         self.lock = asyncio.Lock()
+        
+        self.keep_alive_task = None
 
     async def send_to_peer(self):
         while True:
@@ -422,7 +424,11 @@ class Local:
                 pong_waiter = await self.ws.ping()
                 await pong_waiter
                 logging.info("recvd pong ...")
+                if len(self.stream_map) != 0:
+                     self.last_active_time = datetime.now()
             except websockets.exceptions.ConnectionClosed:
+                return
+            except concurrent.futures.CancelledError:
                 return
 
     async def connect_to_peer(self,reconnect=False):
@@ -454,7 +460,7 @@ class Local:
 
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
-        asyncio.ensure_future(self.keep_alive())
+        self.keep_alive_task = asyncio.ensure_future(self.keep_alive())
         asyncio.ensure_future(self.check_connection())
 
 
