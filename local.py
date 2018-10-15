@@ -92,10 +92,9 @@ class Stream:
                             self.writer.write_eof()
                         except (NotImplementedError, OSError):
                             pass
-                        finally:
-                            self.writer.close()
                     if self.stream_id in self.local.stream_map:
                         del self.local.stream_map[self.stream_id]
+                    self.writer.close()
 
                     return
                 continue
@@ -343,11 +342,17 @@ class Local:
         self.lock = asyncio.Lock()
         
         self.keep_alive_task = None
+        
+        self.check_connection_task = None
+        
+        self.up_data_sizes = 0
+        self.down_data_sizes = 0
 
     async def send_to_peer(self):
         while True:
             try:
                 data = await self.send_queue.get()
+                self.up_data_sizes += len(data)
             except IndexError:
                 return
             try:
@@ -355,6 +360,7 @@ class Local:
             except websockets.exceptions.InvalidState as e:
                 print("Websocket InvalidState : %s" % e.args)
                 self.close_tunnel = True
+                self.ws.close()
                 return
             self.last_active_time = datetime.now()
 
@@ -362,6 +368,7 @@ class Local:
         while True:
             try:
                 data = await self.ws.recv()
+                self.down_data_sizes += len(data)
             except websockets.exceptions.ConnectionClosed as e:
                 logging.info("Websocket ConnectionClosed : %s" % e.args)
                 self.close_tunnel = True
@@ -419,17 +426,19 @@ class Local:
     async def keep_alive(self):
         while True:
             await asyncio.sleep(self.keep_alive_interval)
-            try:
-                logging.info("send ping ...")
+            try:   
+                logging.debug("send ping ...")
                 pong_waiter = await self.ws.ping()
                 await pong_waiter
-                logging.info("recvd pong ...")
+                logging.debug("recvd pong ...")
                 if len(self.stream_map) != 0:
                      self.last_active_time = datetime.now()
             except websockets.exceptions.ConnectionClosed:
                 return
             except concurrent.futures.CancelledError:
                 return
+            finally:
+                self.keep_alive_task = None
 
     async def connect_to_peer(self,reconnect=False):
 
@@ -460,8 +469,10 @@ class Local:
 
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
-        self.keep_alive_task = asyncio.ensure_future(self.keep_alive())
-        asyncio.ensure_future(self.check_connection())
+        if self.keep_alive_task is None:
+            self.keep_alive_task = asyncio.ensure_future(self.keep_alive())
+        if self.check_connection_task is None:
+            self.check_connection_task = asyncio.ensure_future(self.check_connection())
 
 
     async def reconnect(self):
@@ -470,12 +481,16 @@ class Local:
     async def check_connection(self):
         while True:
             await asyncio.sleep(self.keep_alive_interval)
+            print("up %s KB/s,  down  %s KB/s" % ( int(self.up_data_sizes / self.keep_alive_interval / 1024), 
+                   int(self.down_data_sizes / self.keep_alive_interval / 1024)))
+            self.up_data_sizes = self.down_data_sizes = 0
             delta = datetime.now() - self.last_active_time
-            logging.info("Idle seconds %s:",int(delta.total_seconds()))
+            logging.debug("Idle seconds %s:",int(delta.total_seconds()))
             if delta.total_seconds() > self.keep_alive_timeout:
                 self.close_tunnel = True
                 await self.send_queue.put(encode_msg(msgtype=MsgType.CloseTunnel))
                 await self.ws.close()
+                self.check_connection_task = None
                 return
 
     async def new_tcp_income(self, reader, writer):

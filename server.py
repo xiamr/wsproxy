@@ -85,12 +85,15 @@ class Stream:
                 self.write_queue_event.clear()
                 if self.write_and_close:
                     logging.info("close writer : stream  %s" % self.stream_id)
-                    if not self.writer.transport.is_closing():
+                    try:
                         self.writer.write_eof()
-                    if self.stream_id in self.server.stream_map:
-                        del self.server.stream_map[self.stream_id]
-
-                    return
+                    except OSError:
+                        pass
+                    finally:
+                        self.writer.close()
+                        if self.stream_id in self.server.stream_map:
+                            del self.server.stream_map[self.stream_id]
+                        return
                 continue
 
             logging.debug("send some data to server: stream %s" % self.stream_id)
@@ -100,12 +103,16 @@ class Stream:
             except concurrent.futures.CancelledError:
                 raise
             except ConnectionError:
-                if not self.writer.transport.is_closing():
+                try:
                     self.writer.write_eof()
-                if self.stream_id in self.server.stream_map:
-                    del self.server.stream_map[self.stream_id]
+                except OSError:
+                    pass
+                finally:
+                    self.writer.close()
+                    if self.stream_id in self.server.stream_map:
+                        del self.server.stream_map[self.stream_id]
+                    return
 
-                return
 
     def rclose(self):
         self.write_and_close = True
