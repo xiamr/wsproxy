@@ -35,6 +35,16 @@ class Stream:
 
         self.write_and_close = False
 
+    def __del__(self):
+        self.termiate()
+
+    def termiate(self):
+        if self.read_task:
+            self.read_task.cancel()
+        if self.write_task:
+            self.write_task.cancel()
+        self.writer.close()
+
     async def run(self):
         logging.info("connect to %s:%s ... : stream %s " % (addr_convert(self.remote_addr), self.remote_port, self.stream_id))
         try:
@@ -130,6 +140,8 @@ class UDPSession:
         self.remote_addr_type = remote_addr_type
         self.transport = None
 
+    def __del__(self):
+        self.close()
 
     def connection_made(self, transport):
         self.transport = transport
@@ -162,6 +174,13 @@ class UDPAssociate:
 
         self.udpsession_map: dict[(str,int), UDPSession] = {}
 
+    def __del__(self):
+        self.termiateAll()
+
+    def termiateAll(self):
+        self.close()
+        self.udpsession_map = {}
+
     async def new_message_from_peer(self, msg):
         if (msg.remote_addr, msg.remote_port) not in self.udpsession_map:
             trasport, protocol = await \
@@ -183,7 +202,6 @@ class UDPAssociate:
         self.udprelay.send_array_semaphore.release()
 
     async def close(self):
-
         for addr, session in self.udpsession_map.items():
             session.transport.close()
 
@@ -195,6 +213,15 @@ class UDPRelay:
         self.udpassociate_map: dict[(str,int), UDPAssociate] = {}
         self.send_array = []
         self.send_array_semaphore = asyncio.Semaphore(0)
+
+    def __del__(self):
+        self.termiateAll()
+
+    def termiateAll(self):
+        for associate in self.udpassociate_map.values():
+            associate.termiateAll()
+
+        self.udpassociate_map = {}
 
     async def new_message_from_peer(self,msg):
         if (msg.client_addr, msg.client_port) not in self.udpassociate_map:
@@ -217,6 +244,9 @@ class DNSRelay:
     def __init__(self, server):
         self.server = server
         self.send_array = asyncio.Queue()
+
+    def __del__(self):
+        self.transport.close()
 
     def connection_made(self, transport):
         self.transport = transport
@@ -246,7 +276,7 @@ class Server:
     def __init__(self, ws, cipher, normal_dns):
         self.ws = ws
         self.send_queue = TwoPrioQueue()
-        self.stream_map = {}
+        self.stream_map : dict[int, Stream] = {}
         self.cipher = cipher
         self.close_tunnel = False
         self.udprelay = UDPRelay(self)
@@ -256,17 +286,26 @@ class Server:
     async def run(self):
         send_task = asyncio.ensure_future(self.send_to_peer())
 
-        trasport, self.dnsrelay = await \
-            asyncio.get_event_loop().create_datagram_endpoint(
-                lambda: DNSRelay(self), remote_addr=(self.normal_dns, 53))
 
-        self.dnsrelay_run_task = asyncio.ensure_future(self.dnsrelay.run())
+        if enable_dns_relay:
+            trasport, self.dnsrelay = await \
+                asyncio.get_event_loop().create_datagram_endpoint(
+                    lambda: DNSRelay(self), remote_addr=(self.normal_dns, 53))
+
+            self.dnsrelay_run_task = asyncio.ensure_future(self.dnsrelay.run())
         await self.read_from_peer()
         if self.close_tunnel:
             send_task.cancel()
 
         self.udprelay_run_task.cancel()
-        self.dnsrelay_run_task.cancel()
+        for stream in self.stream_map.values():
+            stream.termiate()
+
+        self.udprelay.termiateAll()
+
+        if enable_dns_relay:
+            self.dnsrelay_run_task.cancel()
+            trasport.close()
 
     async def send_to_peer(self):
         while True:
@@ -316,11 +355,10 @@ class Server:
             except KeyError:
                 pass
 
-
-
 cipher = None
 normal_dns = None
 loc = None
+enable_dns_relay = False
 
 
 async def new_ws_connection(ws, path: str):
@@ -350,7 +388,6 @@ def main():
     with open(args.config) as f:
         config = json.load(f)
 
-    enable_ssl = False
 
     if config['mode'] == "replace":
         cipher = Replace()
@@ -365,7 +402,6 @@ def main():
     try:
         ssl_context = ssl.SSLContext()
         ssl_context.load_cert_chain(config['ssl_server_pem'], keyfile=config['ssl_server_key'])
-        enable_ssl = True
     except KeyError:
         ssl_context = None
     global enable_compress
@@ -373,8 +409,9 @@ def main():
     enable_compress = config.pop('compress',True)
     loc = config.pop('loc',None)
 
+    global enable_dns_relay
+    enable_dns_relay = config.pop('dnsrelay',False)
     normal_dns = config.pop('normal_dns','8.8.8.8')
-
 
     loop = asyncio.get_event_loop()
 
@@ -384,7 +421,6 @@ def main():
     else:
         asyncio.ensure_future(websockets.serve(new_ws_connection,
                                            config["serverAddress"], config["serverPort"],ssl=ssl_context))
-
 
 
     loop.run_forever()

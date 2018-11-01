@@ -35,6 +35,13 @@ class Stream:
         self.write_queue_event.set()
 
         self.write_and_close = False
+    
+    def termiate(self):
+        if self.read_task:
+            self.read_task.cancel()
+        if self.write_task:
+            self.write_task.cancel()
+        self.writer.close()
 
     async def run(self):
         logging.info("start new stream : %s, %s:%s" % (self.stream_id, addr_convert(self.remote_addr), self.remote_port))
@@ -134,9 +141,19 @@ class UDPAssociate:
         self.data_array = []
 
         self.run_task = asyncio.ensure_future(self.run())
-        asyncio.ensure_future(self.read())
+        self.read_task = asyncio.ensure_future(self.read())
 
         self.relay: UDPRelay = None
+
+    def __del__(self):
+        self.termiate()
+
+    def termiate(self):
+        if self.run_task:
+            self.run_task.cancel()
+        if self.read_task:
+            self.read_task.cancel()
+        self.writer.close()
 
     def add_relay(self, relay):
         self.relay = relay
@@ -229,6 +246,15 @@ class UDPRelay:
         self.local = local
         self.send_queue = self.local.send_queue
 
+    def __del__(self):
+        self.termiate()
+
+    def termiate(self):
+        for associate in self.udpassociate_map.values():
+            associate.termiate()
+        self.udpassociate_map = {}
+        self.transport.close()
+
     def connection_made(self, transport):
         self.transport = transport
 
@@ -291,6 +317,12 @@ class DNSRelay:
         self.local = local
         self.data_array = asyncio.Queue()
 
+    def __del__(self):
+        self.termiate()
+
+    def termiate(self):
+        self.transport.close()
+
     def connection_made(self, transport):
         self.transport = transport
 
@@ -347,6 +379,22 @@ class Local:
         
         self.up_data_sizes = 0
         self.down_data_sizes = 0
+        
+    def termiateAll(self):
+        for stream in self.stream_map.values():
+            stream.termiate()
+        self.stream_map = {}
+        if self.udprelay:
+            self.udprelay.termiate()
+        if self.dnsrelay:
+            self.dnsrelay.termiate()
+
+        self.udp_transport.close()
+
+        if self.dnsrelay:
+            self.dns_relay_task.cancel()
+            self.dns_transport.close()
+
 
     async def send_to_peer(self):
         while True:
@@ -361,6 +409,7 @@ class Local:
                 print("Websocket InvalidState : %s" % e.args)
                 self.close_tunnel = True
                 self.ws.close()
+                self.termiateAll()
                 return
             self.last_active_time = datetime.now()
 
@@ -372,6 +421,7 @@ class Local:
             except websockets.exceptions.ConnectionClosed as e:
                 logging.info("Websocket ConnectionClosed : %s" % e.args)
                 self.close_tunnel = True
+                self.termiateAll()
                 return
             self.last_active_time = datetime.now()
             try:
@@ -455,17 +505,18 @@ class Local:
 
         if not reconnect:
             asyncio.ensure_future(asyncio.start_server(self.new_tcp_income, self.listen_addr, self.listen_port))
-            transport, self.udprelay = await \
-                asyncio.get_event_loop().create_datagram_endpoint(
-                    lambda: UDPRelay(self, self.listen_addr, self.listen_port),
-                       local_addr=(self.listen_addr, self.listen_port))
-            if self.do_dnsrelay:
-                transport, self.dnsrelay = await  \
-                    asyncio.get_event_loop().create_datagram_endpoint(
-                        lambda: DNSRelay(self),
-                        local_addr=(self.listen_addr, 53))
 
-                asyncio.ensure_future(self.dnsrelay.run())
+        self.udp_transport, self.udprelay = await \
+            asyncio.get_event_loop().create_datagram_endpoint(
+                lambda: UDPRelay(self, self.listen_addr, self.listen_port),
+                   local_addr=(self.listen_addr, self.listen_port))
+        if self.do_dnsrelay:
+            self.dns_transport, self.dnsrelay = await  \
+                asyncio.get_event_loop().create_datagram_endpoint(
+                    lambda: DNSRelay(self),
+                    local_addr=(self.listen_addr, 53))
+
+            self.dns_relay_task = asyncio.ensure_future(self.dnsrelay.run())
 
         asyncio.ensure_future(self.send_to_peer())
         asyncio.ensure_future(self.read_from_peer())
