@@ -257,6 +257,9 @@ class UDPRelay:
 
     def connection_made(self, transport):
         self.transport = transport
+    
+    def connection_lost(exc):
+        pass
 
     def datagram_received(self,data, addr):  #(ip:client_port)
         remote_addr = addr[0]
@@ -695,14 +698,12 @@ def main():
     else:
         print("Unsupported mode",file=sys.stderr)
 
-
     enable_ssl = config.pop('enable_ssl',False)
     ssl_client_ca = config.pop('ssl_client_ca',None)
 
     loc = config.pop('loc','')
 
-    global enable_compress
-    enable_compress = config.pop('compress',True)
+    setEnableCompression(config.pop('compress', True))
 
     local = Local(cipher)
 

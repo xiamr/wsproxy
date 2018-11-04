@@ -17,11 +17,16 @@ import random
 
 padding_content = bytearray(1024)
 
-enable_compress: bool = True
+enableCompression: bool = False
+
+
+def setEnableCompression(bEnableCompression: bool):
+    global enableCompression
+    enableCompression = bEnableCompression
 
 
 class TwoPrioQueue:
-    def __init__(self,maxsize = 0):
+    def __init__(self, maxsize=0):
         self.emergy_queue = []
         self.ordinary_queue = []
         self.put_event = asyncio.Event()
@@ -106,18 +111,18 @@ def encode_enum(obj):
 def decode_enum(obj):
     if '__enum__' in obj:
         name, member = obj['__enum__'].split(".")
-        return getattr(PUBLIC_ENUMS[name],member)
+        return getattr(PUBLIC_ENUMS[name], member)
     else:
         return obj
 
 
 def pack(plaintext):
     data = msgpack.packb(plaintext, use_bin_type=True, default=encode_enum)
-    return bz2.compress(data) if enable_compress else data
+    return bz2.compress(data) if enableCompression else data
 
 
 def unpack(data):
-    data = bz2.decompress(data) if enable_compress else data
+    data = bz2.decompress(data) if enableCompression else data
     return msgpack.unpackb(data, encoding='utf-8', object_hook=decode_enum)
 
 
@@ -158,7 +163,7 @@ def decode_msg(data):
         msg.remote_port = message['REMOTEPORT']
         msg.stream_id = message['STREAMID']
     elif msg.msgtype == MsgType.RClose:
-        msg.stream_id= message['STREAMID']
+        msg.stream_id = message['STREAMID']
     elif msg.msgtype == MsgType.Connection_OK:
         msg.stream_id = message['STREAMID']
     elif msg.msgtype == MsgType.Connection_Failure:
@@ -186,9 +191,8 @@ def decode_msg(data):
 
 
 def encode_msg(**kwargs):
-
     msgtype = kwargs.pop('msgtype')
-    message = {'MSGTYPE' : msgtype}
+    message = {'MSGTYPE': msgtype}
     if msgtype == MsgType.Connect:
         message['REMOTEADDRTYPE'] = kwargs['remote_addr_type']
         message['REMOTEADDR'] = kwargs['remote_addr']
@@ -225,14 +229,15 @@ def encode_msg(**kwargs):
 
 
 class NoEncrypt:
-    def encrypt(self,data):
+    def encrypt(self, data):
         return data
 
-    def decrypt(self,data):
+    def decrypt(self, data):
         return data
 
-    def load_key(self,passphrase):
+    def load_key(self, passphrase):
         pass
+
 
 class Replace:
     def encrypt(self, data):
@@ -281,5 +286,3 @@ class AES_128_GCM:
         h = MD5.new()
         h.update(passphrase.encode())
         self.key = h.digest()
-
-

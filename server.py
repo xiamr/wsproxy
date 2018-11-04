@@ -404,9 +404,9 @@ def main():
         ssl_context.load_cert_chain(config['ssl_server_pem'], keyfile=config['ssl_server_key'])
     except KeyError:
         ssl_context = None
-    global enable_compress
 
-    enable_compress = config.pop('compress',True)
+    setEnableCompression(config.pop('compress', True))
+
     loc = config.pop('loc',None)
 
     global enable_dns_relay
