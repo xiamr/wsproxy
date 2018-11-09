@@ -258,7 +258,7 @@ class UDPRelay:
     def connection_made(self, transport):
         self.transport = transport
     
-    def connection_lost(exc):
+    def connection_lost(self, exc):
         pass
 
     def datagram_received(self,data, addr):  #(ip:client_port)
@@ -382,6 +382,9 @@ class Local:
         
         self.up_data_sizes = 0
         self.down_data_sizes = 0
+
+        self.uploadTraffic   = 0   
+        self.downloadTraffic = 0   
         
     def termiateAll(self):
         for stream in self.stream_map.values():
@@ -404,6 +407,7 @@ class Local:
             try:
                 data = await self.send_queue.get()
                 self.up_data_sizes += len(data)
+                self.uploadTraffic += len(data)
             except IndexError:
                 return
             try:
@@ -421,6 +425,7 @@ class Local:
             try:
                 data = await self.ws.recv()
                 self.down_data_sizes += len(data)
+                self.downloadTraffic += len(data)
             except websockets.exceptions.ConnectionClosed as e:
                 logging.info("Websocket ConnectionClosed : %s" % e.args)
                 self.close_tunnel = True
@@ -535,8 +540,11 @@ class Local:
     async def check_connection(self):
         while True:
             await asyncio.sleep(self.keep_alive_interval)
-            print("up %s KB/s,  down  %s KB/s" % ( int(self.up_data_sizes / self.keep_alive_interval / 1024), 
-                   int(self.down_data_sizes / self.keep_alive_interval / 1024)))
+            print("up %s KB/s,  down  %s KB/s : Total Upload %s MB, Total Download %s MB" % 
+                (int(self.up_data_sizes / self.keep_alive_interval / 1024), 
+                  int(self.down_data_sizes / self.keep_alive_interval / 1024),
+                  int(self.uploadTraffic / 1024/ 1024),
+                  int(self.downloadTraffic / 1024/1024)))
             self.up_data_sizes = self.down_data_sizes = 0
             delta = datetime.now() - self.last_active_time
             logging.debug("Idle seconds %s:",int(delta.total_seconds()))
